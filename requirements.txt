@@ -1,0 +1,11 @@
+# Atlas Translation Proxy + installer deps
+# Run with the project venv:  .venv/bin/python -m pip install -r requirements.txt
+
+fastapi>=0.111
+"uvicorn[standard]>=0.30"
+httpx>=0.27
+h2>=4.1  # HTTP/2 for upstream requests (proxy.py uses httpx http2=True)
+orjson>=3.10
+rich>=13.7
+# uvloop gives faster event-loop performance but is not supported on Windows.
+uvloop>=0.19 ; platform_system != "Windows"

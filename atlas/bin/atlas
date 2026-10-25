@@ -216,14 +216,15 @@ def http_health(url: str) -> tuple[bool, str]:
 def cmd_install(args) -> int:
     """Atlas proxy + coding-harness setup wizard.
 
-    Replaces the old "thin wrapper around install.sh" flow. Now drives:
-      harness detection/install → provider selection → key import →
-      harness configuration (with backups) → smoke test → launch.
+    Drives: venv/deps -> CLI shim -> auto-start -> provider selection -> key
+    import -> harness install/configure -> smoke test -> launch.
     """
     import importlib
-    sys.path.insert(0, str(REPO_ROOT / "atlas"))
-    wizard = importlib.import_module("bin.setup_wizard")
-    return wizard.run_wizard(dry_run=getattr(args, "dry_run", False))
+    sys.path.insert(0, str(REPO_ROOT))
+    wizard = importlib.import_module("setup.wizard")
+    return wizard.install_and_run(
+        REPO_ROOT, dry_run=getattr(args, "dry_run", False)
+    )
 
 
 def cmd_uninstall(args) -> int:
@@ -232,12 +233,10 @@ def cmd_uninstall(args) -> int:
     section(title)
     if dry_run:
         CONSOLE.print(yellow("  DRY-RUN — no changes will be made"))
-    script = REPO_ROOT / "setup" / "install.sh"
-    if not script.exists():
-        CONSOLE.print(red(f"ERR: installer not found at {script}"))
+    cmd = _installer_cmd("uninstall", dry_run)
+    if not cmd:
         return 1
-    flags = ["--dry-run"] if dry_run else ["--uninstall"]
-    return subprocess.call(["bash", str(script), *flags])
+    return subprocess.call(cmd)
 
 
 def cmd_start(args) -> int:
@@ -387,9 +386,41 @@ def cmd_doctor(args) -> int:
     return 1
 
 
+def _installer_cmd(action: str, dry_run: bool = False) -> list[str]:
+    """Build the command to invoke the OS-native installer bootstrap.
+
+    action: 'check' or 'uninstall'. Linux/macOS -> bash install.sh;
+    Windows -> powershell -File install.ps1. Installer scripts live at the
+    repo root (install.sh / install.ps1).
+    """
+    if platform.system().lower().startswith("win"):
+        script = REPO_ROOT / "install.ps1"
+        if not script.exists():
+            CONSOLE.print(red(f"ERR: installer not found at {script}"))
+            return []
+        flag = "-Check" if action == "check" else "-Uninstall"
+        cmd = ["powershell", "-NoProfile", "-NonInteractive",
+               "-ExecutionPolicy", "ByPass", "-File", str(script), flag]
+        if dry_run:
+            cmd.append("-DryRun")
+        return cmd
+    script = REPO_ROOT / "install.sh"
+    if not script.exists():
+        CONSOLE.print(red(f"ERR: installer not found at {script}"))
+        return []
+    flag = "--check" if action == "check" else "--uninstall"
+    cmd = ["bash", str(script), flag]
+    if dry_run:
+        cmd.append("--dry-run")
+    return cmd
+
+
 def cmd_check(args) -> int:
-    """Thin wrapper around setup/install.sh --check (no colour spinner)."""
-    return subprocess.call(["bash", str(REPO_ROOT / "setup" / "install.sh"), "--check"])
+    """Run installer diagnostics on the local install (non-interactive)."""
+    cmd = _installer_cmd("check", getattr(args, "dry_run", False))
+    if not cmd:
+        return 1
+    return subprocess.call(cmd)
 
 
 def cmd_config(args) -> int:
@@ -597,7 +628,7 @@ HELP_TEXT = f"""
   [cyan]atlas[/cyan] logs                 Tail logs (journald or file)
   [cyan]atlas[/cyan] config               Show resolved config values
   [cyan]atlas[/cyan] doctor               Diagnose common problems
-  [cyan]atlas[/cyan] check                Thin wrapper around setup/install.sh --check
+  [cyan]atlas[/cyan] check                Diagnostics via install.sh --check on the local install
 
 [bold]Keys[/bold]
   [cyan]atlas[/cyan] import-key <KEY>      Append a single key to the key file

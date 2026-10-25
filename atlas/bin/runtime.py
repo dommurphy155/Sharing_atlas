@@ -43,7 +43,8 @@ from typing import Literal, Protocol
 # ---------------------------------------------------------------------------
 
 OSFamily = Literal["linux", "macos", "windows", "other"]
-RuntimeMode = Literal["systemd", "systemd-user", "tmux", "nohup", "manual"]
+RuntimeMode = Literal["systemd", "systemd-user", "tmux", "nohup", "manual",
+                      "launchd", "scheduled-task"]
 
 # Tmux-equivalent binaries (tmux itself + native Windows clones).
 TMUX_BINARIES = ("tmux", "psmux", "tmuxw", "lumux", "qscn", "wmux")
@@ -62,6 +63,8 @@ class RuntimeEnv:
     systemd_pid1: bool
     has_user_systemd: bool
     has_loginctl: bool
+    has_launchctl: bool = False  # macOS launchd availability
+    has_tasklist: bool = False  # Windows schtasks availability
     tmux_bin: str | None  # first tmux-equivalent on PATH
     has_nohup: bool
 
@@ -112,6 +115,16 @@ class RuntimeEnv:
     @property
     def nohup_usable(self) -> bool:
         return self.os in ("linux", "macos", "other") and self.has_nohup
+
+    @property
+    def launchd_usable(self) -> bool:
+        # macOS native supervisor — auto-starts at login, survives reboot.
+        return self.os == "macos" and self.has_launchctl
+
+    @property
+    def scheduled_task_usable(self) -> bool:
+        # Windows Task Scheduler — auto-starts at log-on, survives reboot.
+        return self.os == "windows" and self.has_tasklist
 
 
 def detect_os() -> OSFamily:
@@ -186,6 +199,10 @@ def detect_env() -> RuntimeEnv:
                 has_user_systemd = True
 
     tmux_bin = _find_tmux()
+    # macOS launchd (native auto-start / supervisor).
+    has_launchctl = os_name == "macos" and shutil.which("launchctl") is not None
+    # Windows Task Scheduler (native auto-start / supervisor).
+    has_tasklist = os_name == "windows" and shutil.which("schtasks") is not None
     # Windows: also check PATHEXT-less exe names; shutil.which handles that.
 
     # nohup is a shell builtin on some shells but also a binary on most
@@ -201,6 +218,8 @@ def detect_env() -> RuntimeEnv:
         systemd_pid1=systemd_pid1,
         has_user_systemd=has_user_systemd,
         has_loginctl=has_loginctl,
+        has_launchctl=has_launchctl,
+        has_tasklist=has_tasklist,
         tmux_bin=tmux_bin,
         has_nohup=has_nohup,
     )
@@ -212,18 +231,24 @@ def choose_mode(env: RuntimeEnv) -> RuntimeMode:
     Order of preference (highest first):
       1. systemd         — full system service, root or sudo
       2. systemd-user    — user-scoped systemd service
-      3. tmux            — detached user tmux session
-      4. nohup           — POSIX nohup, last mechanical fallback
-      5. manual          — Windows without tmux — user runs it themselves
+      3. launchd         — macOS native (auto-start at login, survives reboot)
+      4. tmux            — detached user tmux session
+      5. nohup           — POSIX nohup, last mechanical fallback
+      6. scheduled-task  — Windows Task Scheduler (auto-start at log-on)
+      7. manual          — no supervisor available; user runs it themselves
     """
     if env.systemd_system_usable:
         return "systemd"
     if env.systemd_user_usable:
         return "systemd-user"
+    if env.launchd_usable:
+        return "launchd"
     if env.tmux_usable:
         return "tmux"
     if env.nohup_usable:
         return "nohup"
+    if env.scheduled_task_usable:
+        return "scheduled-task"
     return "manual"
 
 
@@ -720,6 +745,272 @@ class ManualRuntime:
         return {"mode": "manual"}
 
 
+# ---- launchd (macOS) ------------------------------------------------------
+# Native supervisor: a per-user LaunchAgent plist in ~/Library/LaunchAgents.
+# RunAtLoad + KeepAlive means the proxy starts at login and is restarted by the
+# OS if it dies — "survives reboot" for free. No admin required.
+class LaunchdRuntime:
+    DOMAIN = "gui"  # per-user GUI domain
+    LABEL = "com.atlas.proxy"
+
+    def __init__(self, env: RuntimeEnv, repo_root: Path, service_name: str,
+                 venv_py: Path, log_file: Path) -> None:
+        self.env = env
+        self.repo_root = repo_root
+        self.service_name = service_name
+        self.venv_py = venv_py
+        self.log_file = log_file
+        self.label = self.LABEL
+        self.info = RuntimeInfo(
+            mode="launchd", label="launchd (LaunchAgent)",
+            session=self.label, pid=None,
+        )
+
+    # _agent_domain returns "gui/<uid>" used by bootstrap/bootout on macOS 10.10+
+    def _domain(self) -> str:
+        try:
+            uid = str(os.getuid())
+        except AttributeError:
+            uid = "0"
+        return f"gui/{uid}"
+
+    def _plist_path(self) -> Path:
+        return Path.home() / "Library" / "LaunchAgents" / f"{self.label}.plist"
+
+    def _plist(self) -> str:
+        env_vars = {
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        env_block = "".join(
+            f"    <key>{k}</key>\n    <string>{v}</string>\n"
+            for k, v in env_vars.items()
+        )
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+            '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0"><dict>\n'
+            f'  <key>Label</key>\n  <string>{self.label}</string>\n'
+            f'  <key>ProgramArguments</key>\n  <array>\n'
+            f'    <string>{self.venv_py}</string>\n'
+            '    <string>-m</string>\n    <string>proxy.main</string>\n'
+            '  </array>\n'
+            f'  <key>WorkingDirectory</key>\n  <string>{self.repo_root}</string>\n'
+            '  <key>EnvironmentVariables</key>\n  <dict>\n'
+            f'{env_block}'
+            '  </dict>\n'
+            '  <key>RunAtLoad</key>\n  <true/>\n'
+            '  <key>KeepAlive</key>\n  <true/>\n'
+            f'  <key>StandardOutPath</key>\n  <string>{self.log_file}</string>\n'
+            f'  <key>StandardErrorPath</key>\n  <string>{self.log_file}</string>\n'
+            '</dict></plist>\n'
+        )
+
+    def install(self) -> tuple[bool, str]:
+        # Idempotent: install_runtime can call install() more than once across
+        # the wizard + verify passes. macOS treats a re-bootstrap as an error
+        # ("already loaded"), so guard it here.
+        r = _run_quiet(["launchctl", "print", f"{self._domain()}/{self.label}"], timeout=5.0)
+        if r is not None and r.returncode == 0:
+            return True, f"already loaded ({self.label})"
+        plist = self._plist_path()
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_text(self._plist())
+        # (Re)load. macOS 10.15+: bootstrap gui/<uid> <plist>; older: launchctl
+        # load -w. Try bootstrap first, fall back to load.
+        r = _run_quiet(["launchctl", "bootstrap", self._domain(), str(plist)], timeout=10.0)
+        if r is None or r.returncode != 0:
+            r = _run_quiet(["launchctl", "load", "-w", str(plist)], timeout=10.0)
+        if r is None or r.returncode != 0:
+            return False, (r.stderr.strip() if r else "launchctl bootstrap/load failed")
+        return True, f"LaunchAgent installed ({plist.name})"
+
+    def start(self) -> tuple[bool, str]:
+        # kickstart -k forces a (re)start of the job.
+        r = _run_quiet(["launchctl", "kickstart", "-k", f"{self._domain()}/{self.label}"], timeout=10.0)
+        if r is None or r.returncode != 0:
+            # Fallback: unload+load (effectively a restart)
+            _run_quiet(["launchctl", "unload", str(self._plist_path())], timeout=5.0)
+            r = _run_quiet(["launchctl", "load", str(self._plist_path())], timeout=10.0)
+        if r is None or r.returncode != 0:
+            return False, (r.stderr.strip() if r else "launchctl start failed")
+        return True, f"started via launchd ({self.label})"
+
+    def stop(self) -> tuple[bool, str]:
+        r = _run_quiet(["launchctl", "bootout", f"{self._domain()}/{self.label}"], timeout=10.0)
+        if r is None or r.returncode != 0:
+            # Older invocation
+            r = _run_quiet(["launchctl", "unload", str(self._plist_path())], timeout=10.0)
+        if r is None or r.returncode != 0:
+            return False, (r.stderr.strip() if r else "launchctl stop failed")
+        return True, f"stopped via launchd ({self.label})"
+
+    def status(self) -> tuple[bool, str]:
+        r = _run_quiet(["launchctl", "print", f"{self._domain()}/{self.label}"], timeout=10.0)
+        if r is None:
+            return False, "launchctl unavailable"
+        if r.returncode != 0:
+            return False, "not loaded"
+        return True, "loaded (at login + KeepAlive)"
+
+    def logs(self, follow: bool = True) -> int:
+        if not self.log_file.exists():
+            print(f"No log file yet: {self.log_file}", file=sys.stderr)
+            return 1
+        cmd = ["tail", "-n", "40"]
+        if follow:
+            cmd.append("-f")
+        cmd.append(str(self.log_file))
+        try:
+            return subprocess.call(cmd)
+        except FileNotFoundError:
+            return 1
+
+    def cleanup(self) -> None:
+        """Best-effort: unload + remove the plist. Never raises."""
+        try:
+            self.stop()
+        except Exception:
+            pass
+        try:
+            self._plist_path().unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def env_summary(self) -> dict:
+        return {"mode": "launchd", "label": self.label, "plist": str(self._plist_path())}
+
+
+# ---- Windows Task Scheduler -------------------------------------------------
+# A scheduled task (trigger: at log on, with restart-on-failure) is the native
+# Windows supervisor that starts at login and survives reboot. The task action
+# runs the venv python on `proxy.main`; no admin required (per-user task).
+class WindowsRuntime:
+    TASK_NAME = "Atlas Proxy"
+
+    def __init__(self, env: RuntimeEnv, repo_root: Path, service_name: str,
+                 venv_py: Path, log_file: Path) -> None:
+        self.env = env
+        self.repo_root = repo_root
+        self.service_name = service_name
+        self.venv_py = venv_py
+        self.log_file = log_file
+        self.info = RuntimeInfo(
+            mode="scheduled-task", label="scheduled task (at log on)",
+            session=self.TASK_NAME, pid=None,
+        )
+
+    def _action(self) -> str:
+        # Run the proxy in the venv, detached, logging to file.
+        return str(self.venv_py)
+
+    def install(self) -> tuple[bool, str]:
+        # Remove a pre-existing task with the same name (idempotent), then
+        # register a fresh one.
+        self._schtasks(["/End", f"/TN", self.TASK_NAME], check=False)
+        self._schtasks(["/Delete", "/F", f"/TN", self.TASK_NAME], check=False)
+        args = f'-NoProfile -WindowStyle Hidden "{self.venv_py}" -m proxy.main'
+        script = (
+            f'$a = New-ScheduledTaskAction -Execute "python" -Argument "{args}"\n'
+            f'$t = New-ScheduledTaskTrigger -AtLogOn\n'
+            f'$s = New-ScheduledTaskSettingsSet -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1) '
+            f'-AllowStartIfOnline -DontStopIfGoingOnBatteries\n'
+            f'$p = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited\n'
+            f'Register-ScheduledTask -TaskName "Atlas Proxy" -Action $a -Trigger $t -Settings $s -Principal $p'
+        )
+        r = run_powershell_local(script, timeout=30.0)
+        if not r or r.returncode != 0:
+            return False, (r.stderr.strip() if r else "scheduled task registration failed")
+        # Start it now (the at-logon trigger only fires on next logon).
+        self.start()
+        return True, f"scheduled task registered ({self.TASK_NAME})"
+
+    def _schtasks(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess | None:
+        return _run_quiet(["schtasks", *args], timeout=10.0)
+
+    def start(self) -> tuple[bool, str]:
+        r = self._schtasks(["/Run", f"/TN", self.TASK_NAME])
+        if r is None or r.returncode != 0:
+            # If the task isn't registered yet, fall back to launching the
+            # process directly so the proxy is up for verification this session.
+            try:
+                self.log_file.parent.mkdir(parents=True, exist_ok=True)
+                with self.log_file.open("ab") as fh:
+                    subprocess.Popen(
+                        [str(self.venv_py), "-m", "proxy.main"],
+                        stdout=fh, stderr=subprocess.STDOUT,
+                        stdin=subprocess.DEVNULL, cwd=str(self.repo_root),
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+            except OSError as e:
+                return False, f"could not start proxy process: {e}"
+        return True, f"started ({self.TASK_NAME})"
+
+    def stop(self) -> tuple[bool, str]:
+        r = self._schtasks(["/End", f"/TN", self.TASK_NAME])
+        # Also kill any lingering proxy.main process on this machine.
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", "python.exe", "/T"],
+                           capture_output=True, text=True, timeout=10)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        if r is None:
+            return False, "schtasks unavailable"
+        return True, f"stopped ({self.TASK_NAME})"
+
+    def status(self) -> tuple[bool, str]:
+        r = self._schtasks(["/Query", "/TN", self.TASK_NAME, "/FO", "LIST"])
+        if r is None:
+            return False, "schtasks unavailable"
+        if r.returncode != 0:
+            return False, "task not registered"
+        running = "Running" in (r.stdout or "")
+        return running, ("running (scheduled task)" if running else "registered (at log on)")
+
+    def logs(self, follow: bool = True) -> int:
+        if not self.log_file.exists():
+            print(f"No log file yet: {self.log_file}", file=sys.stderr)
+            return 1
+        try:
+            return subprocess.call(["more", str(self.log_file)])
+        except FileNotFoundError:
+            return 1
+
+    def cleanup(self) -> None:
+        """Best-effort: stop + delete the task. Never raises."""
+        try:
+            self._schtasks(["/End", f"/TN", self.TASK_NAME])
+        except Exception:
+            pass
+        try:
+            self._schtasks(["/Delete", "/F", f"/TN", self.TASK_NAME])
+        except Exception:
+            pass
+
+    def env_summary(self) -> dict:
+        return {"mode": "scheduled-task", "task": self.TASK_NAME}
+
+
+def run_powershell_local(script: str, timeout: float = 30.0) -> subprocess.CompletedProcess | None:
+    """One-off PowerShell invocation used by the Windows runtime.
+
+    Kept here (next to the only caller) so runtime.py stays import-safe on
+    POSIX — the WindowsRuntime path is only taken on Windows.
+    """
+    import shutil as _sh
+    ps = _sh.which("pwsh") or _sh.which("powershell") or _sh.which("powershell.exe")
+    if not ps:
+        return None
+    try:
+        return subprocess.run(
+            [ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "ByPass",
+             "-Command", script],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Persistence: data/runtime.json
 # ---------------------------------------------------------------------------
@@ -929,7 +1220,8 @@ def _candidate_modes(env: RuntimeEnv) -> list[RuntimeMode]:
     """Build the ordered list of runtime candidates for this environment.
 
     Linux:  systemd-system -> systemd-user -> tmux -> nohup
-    macOS:  tmux -> nohup
+    macOS:  launchd -> tmux -> nohup
+    Windows: scheduled-task -> manual
     Other:  tmux -> nohup
     Manual is always the final fallback (handled by the caller).
     """
@@ -943,6 +1235,20 @@ def _candidate_modes(env: RuntimeEnv) -> list[RuntimeMode]:
             candidates.append("tmux")
         if env.nohup_usable:
             candidates.append("nohup")
+        return candidates
+    if env.os == "macos":
+        candidates = []
+        if env.launchd_usable:
+            candidates.append("launchd")
+        if env.tmux_usable:
+            candidates.append("tmux")
+        if env.nohup_usable:
+            candidates.append("nohup")
+        return candidates
+    if env.os == "windows":
+        candidates = []
+        if env.scheduled_task_usable:
+            candidates.append("scheduled-task")
         return candidates
     candidates = []
     if env.tmux_usable:
@@ -969,6 +1275,12 @@ def build_runtime(mode: RuntimeMode, env: RuntimeEnv, repo_root: Path,
                             paths["pid_file"], paths["log_file"])
     if mode == "manual":
         return ManualRuntime()
+    if mode == "launchd":
+        return LaunchdRuntime(env, repo_root, service_name,
+                              paths["venv_py"], paths["log_file"])
+    if mode == "scheduled-task":
+        return WindowsRuntime(env, repo_root, service_name,
+                              paths["venv_py"], paths["log_file"])
     raise ValueError(f"unknown runtime mode: {mode!r}")
 
 
@@ -1012,6 +1324,10 @@ def _mode_usable(mode: RuntimeMode, env: RuntimeEnv) -> bool:
         return env.tmux_usable
     if mode == "nohup":
         return env.nohup_usable
+    if mode == "launchd":
+        return env.launchd_usable
+    if mode == "scheduled-task":
+        return env.scheduled_task_usable
     if mode == "manual":
         return True
     return False

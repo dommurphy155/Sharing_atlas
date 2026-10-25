@@ -11,3 +11,8 @@ site-packages/
 
 # Atlas proxy API keys — keep credentials private
 openroute_keys.txt
+
+# Python bytecode cache (auto-generated on import; never commit)
+__pycache__/
+*.pyc
+*.pyo
