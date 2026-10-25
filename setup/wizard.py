@@ -286,6 +286,14 @@ HARNESSES: list[Harness] = [
 ]
 
 
+def _harness_by_id(id_: str) -> Harness | None:
+    """Look up a Harness by id ('claude'/'codex'/'hermes'), or None."""
+    for h in HARNESSES:
+        if h.id == id_:
+            return h
+    return None
+
+
 # ===========================================================================
 # Shared small helpers (keys / json / rc files / backup)
 # ===========================================================================
@@ -540,9 +548,12 @@ def _verify(repo: Path, h: Harness | None, has_keys: bool, dry_run: bool) -> lis
     py = core.venv_python(repo)
 
     results.append(("Python venv present", py.is_file(), str(py)))
-    r = subprocess.run([str(py), "-c", "import fastapi,uvicorn,httpx,orjson,rich"],
-                       capture_output=True, text=True, timeout=30)
-    results.append(("Deps importable", r.returncode == 0, r.stderr.strip()[:160] or "ok"))
+    if dry_run:
+        results.append(("Deps importable", True, "dry-run (skipped)"))
+    else:
+        r = subprocess.run([str(py), "-c", "import fastapi,uvicorn,httpx,orjson,rich"],
+                           capture_output=True, text=True, timeout=30)
+        results.append(("Deps importable", r.returncode == 0, r.stderr.strip()[:160] or "ok"))
 
     # proxy config + keys
     from proxy.config import LISTEN_PORT, PROVIDER  # type: ignore
@@ -553,8 +564,12 @@ def _verify(repo: Path, h: Harness | None, has_keys: bool, dry_run: bool) -> lis
     # proxy start + health
     ok, msg = _start_proxy(repo, dry_run)
     results.append(("proxy started", ok, msg))
-    healthy, hmsg = core.health_check(repo, timeout=8 if not dry_run else 0.1)
-    results.append(("proxy /health responds", healthy, hmsg))
+    if dry_run:
+        healthy = False
+        results.append(("proxy /health responds", True, "dry-run (proxy not started)"))
+    else:
+        healthy, hmsg = core.health_check(repo, timeout=8)
+        results.append(("proxy /health responds", healthy, hmsg))
 
     # real model request (only meaningful if keys present + proxy up)
     if healthy and has_keys:
@@ -566,12 +581,17 @@ def _verify(repo: Path, h: Harness | None, has_keys: bool, dry_run: bool) -> lis
 
     if h is None:
         # proxy-only install — skip harness-specific checks
-        osmod = _os_module()
         results.append(("atlas CLI on PATH", shutil.which("atlas") is not None,
                         shutil.which("atlas") or "not on PATH"))
-        if hasattr(osmod, "verify_startup"):
-            sup_ok, sup_msg = osmod.verify_startup(repo)
-            results.append(("auto-start registered", sup_ok, sup_msg))
+        if dry_run:
+            results.append(("auto-start registered", True, "dry-run (skipped)"))
+        else:
+            osmod = _os_module()
+            if hasattr(osmod, "verify_startup"):
+                sup_ok, sup_msg = osmod.verify_startup(repo)
+                results.append(("auto-start registered", sup_ok, sup_msg))
+            else:
+                results.append(("auto-start registered", False, "no verify_startup"))
         return results
 
     # harness
@@ -646,17 +666,37 @@ def _launch(h: Harness) -> None:
 # ===========================================================================
 # Top-level wizard + install orchestration
 # ===========================================================================
-def run_wizard(repo: Path, dry_run: bool = False) -> int:
+def run_wizard(repo: Path, dry_run: bool = False, harness: str | None = None,
+               provider: str | None = None, skip_keys: bool = False) -> int:
+    """Run the harness + keys + verify + launch flow.
+
+    harness: None => ask interactively; "" => proxy-only install (no harness);
+             "claude" / "codex" / "hermes" => use that harness (headless-safe).
+    provider: None => ask interactively; else a provider name (headless-safe).
+    skip_keys: skip interactive key import (keys can be added later via
+               `atlas import-key` / `atlas import-key-file`).
+    """
     _intro()
     # 1. Harness
-    h = _pick_harness()
+    if harness is None:
+        h = _pick_harness()
+    elif harness == "":
+        h = None
+    else:
+        h = _harness_by_id(harness)
+        if h is None:
+            CONSOLE.print(f"[red]unknown harness id: {harness}[/red]")
+            return 1
     # 2. Provider + keys (runs while a harness installs in the background)
-    provider = _pick_provider()
+    chosen = provider if provider is not None else _pick_provider()
     has_keys = False
-    if provider:
-        n = _import_keys(repo, provider, dry_run)
-        has_keys = n > 0 or bool(_existing_keys(core.key_file_for(repo, provider)))
-        core.write_runtime_provider(repo, provider)
+    if chosen:
+        if skip_keys:
+            CONSOLE.print("[dim]skipping key import (--skip-keys)[/dim]")
+        else:
+            n = _import_keys(repo, chosen, dry_run)
+            has_keys = n > 0 or bool(_existing_keys(core.key_file_for(repo, chosen)))
+        core.write_runtime_provider(repo, chosen)
     else:
         _write_runtime_provider_fallback(repo, dry_run)
 
@@ -705,7 +745,8 @@ def _write_runtime_provider_fallback(repo: Path, dry_run: bool) -> None:
     core.write_runtime_provider(repo, "openrouter")
 
 
-def install_and_run(repo: Path, dry_run: bool = False) -> int:
+def install_and_run(repo: Path, dry_run: bool = False, harness: str | None = None,
+                    provider: str | None = None, skip_keys: bool = False) -> int:
     """Full bootstrap entry used by install.sh/install.ps1 and `atlas install`.
 
     Order: ensure data dirs + venv + deps → install CLI shim → register
@@ -716,7 +757,8 @@ def install_and_run(repo: Path, dry_run: bool = False) -> int:
     CONSOLE.print(f"[dim]os: {core.detect_os()} / arch: {core.detect_arch()}[/dim]")
     if dry_run:
         CONSOLE.print("[yellow]DRY-RUN — no changes will be made[/yellow]")
-        return run_wizard(repo, dry_run=True)
+        return run_wizard(repo, dry_run=True, harness=harness,
+                          provider=provider, skip_keys=skip_keys)
     core.ensure_data_dirs(repo)
     # venv + deps (idempotent; re-execs handled by caller if needed)
     try:
@@ -739,4 +781,48 @@ def install_and_run(repo: Path, dry_run: bool = False) -> int:
     ok, msg = _start_proxy(repo, dry_run=False)
     CONSOLE.print(("  [green]✔[/green]" if ok else "  [yellow]⚠[/yellow]") + f" proxy: {msg}")
     # Interactive harness + keys + verify + launch
-    return run_wizard(repo, dry_run=False)
+    return run_wizard(repo, dry_run=False, harness=harness,
+                      provider=provider, skip_keys=skip_keys)
+
+
+# ---------------------------------------------------------------------------
+# Standalone entry: `python -m setup.wizard [--repo DIR] ...`
+# Without this `if __name__ == "__main__"` block, `python -m setup.wizard` is
+# a silent no-op — and install.sh/install.ps1 hand off to exactly that.
+# ---------------------------------------------------------------------------
+def _arg_parser() -> "argparse.ArgumentParser":
+    import argparse
+    ap = argparse.ArgumentParser(
+        prog="python -m setup.wizard",
+        description="Atlas cross-platform installer wizard",
+    )
+    ap.add_argument("--repo", "--dest", dest="repo", default=None,
+                    help="install destination (default: auto-detect repo root)")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--no-harness", action="store_true",
+                    help="proxy-only install (skip harness pick/install/launch)")
+    ap.add_argument("--harness", choices=["claude", "codex", "hermes"], default=None,
+                    help="install/verify a specific harness (headless-safe)")
+    ap.add_argument("--provider", choices=["openrouter", "huggingface", "nvidia"],
+                    default=None, help="set the upstream provider without prompting")
+    ap.add_argument("--skip-keys", action="store_true",
+                    help="skip interactive key import (add keys later via atlas import-key)")
+    return ap
+
+
+if __name__ == "__main__":
+    _ns = _arg_parser().parse_args(sys.argv[1:])
+    _repo = Path(_ns.repo).resolve() if _ns.repo else core.repo_root()
+    _harness = "" if _ns.no_harness else (_ns.harness or None)
+    _provider = _ns.provider
+    _skip_keys = _ns.skip_keys
+    # Headless (no TTY): never block on an interactive prompt. Default to a
+    # safe proxy-only install with OpenRouter so `python -m setup.wizard`
+    # driven by install.sh/install.ps1 or CI always completes deterministically.
+    if _ns.harness is None and not sys.stdin.isatty():
+        _harness = _harness or ""
+    if sys.stdin.isatty() is False:
+        _provider = _provider or "openrouter"
+        _skip_keys = True
+    sys.exit(install_and_run(_repo, dry_run=_ns.dry_run, harness=_harness,
+                             provider=_provider, skip_keys=_skip_keys))

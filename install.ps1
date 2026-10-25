@@ -126,11 +126,22 @@ if (-not $DryRun) {
     if ($LASTEXITCODE) { Write-Error "pip install failed"; exit 1 }
 }
 
-$wflags = @( "-Repo", $Prefix )
-if ($DryRun) { $wflags += "-DryRun" }
-if ($NoHarness) { $wflags += "-NoHarness" }
-if ($Provider) { $wflags += "-Provider", $Provider }
-if ($SkipKeys) { $wflags += "-SkipKeys" }
+# Python-style argparse flags (--repo/--dry-run/...) passed to the wizard module.
+# These are NOT PowerShell switches — the wizard uses argparse.
+$wflags = @( "--repo", $Prefix )
+if ($DryRun) { $wflags += "--dry-run" }
+if ($NoHarness) { $wflags += "--no-harness" }
+if ($Provider) { $wflags += "--provider", $Provider }
+if ($SkipKeys) { $wflags += "--skip-keys" }
+
+# Regression guard: prove the wizard module is runnable as a script before
+# handing off. A missing `if __name__ == "__main__"` block would otherwise make
+# `python -m setup.wizard` exit silently with nothing installed.
+& $VenvPython -m setup.wizard --help > $null 2>&1
+if ($LASTEXITCODE) {
+    Write-Error "setup/wizard.py has no usable entry point (missing __main__) - aborting"
+    exit 1
+}
 
 Write-Host "-> launching wizard"
 Push-Location $Prefix

@@ -187,4 +187,11 @@ WFLAGS=( --repo "$PREFIX" )
 [ -n "$PROVIDER" ] && WFLAGS+=( --provider "$PROVIDER" )
 [ $SKIP_KEYS -eq 1 ] && WFLAGS+=( --skip-keys )
 echo "→ launching wizard"
+# Regression guard: prove the wizard module is runnable as a script before
+# handing off. A missing `if __name__ == "__main__"` block would otherwise make
+# `python -m setup.wizard` exit silently with nothing installed.
+"$VENVPY" -m setup.wizard --help >/dev/null 2>&1 || {
+    echo "[!] setup/wizard.py has no usable entry point (missing __main__) — aborting" >&2
+    exit 1
+}
 exec "$VENVPY" -m setup.wizard "${WFLAGS[@]}"
