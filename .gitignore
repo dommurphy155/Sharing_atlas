@@ -1,0 +1,13 @@
+# Site packages / virtual environments — never commit dependencies
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Any top-level site-packages directory
+site-packages/
+
+# Atlas proxy API keys — keep credentials private
+openroute_keys.txt

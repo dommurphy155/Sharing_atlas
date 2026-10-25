@@ -1,0 +1,712 @@
+#!/usr/bin/env python3
+"""atlas — CLI for the Atlas Translation Proxy.
+
+Repo-location agnostic: walks up from this script's location to find the
+proxy package.  Subcommands cover the full proxy lifecycle:
+
+    atlas install / uninstall / start / stop / restart / status / logs
+    atlas doctor / check / config / version
+
+When run via the symlink at /usr/local/bin/atlas, it is hard-scoped to
+this proxy repo only — nothing in this CLI touches OpenRouter / NVIDIA /
+HuggingFace automation (those live in the full Atlas bundle, not here).
+"""
+from __future__ import annotations
+
+import argparse
+import difflib
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Repo discovery
+# ---------------------------------------------------------------------------
+def _find_repo_root() -> Path:
+    """Repo root = parent of atlas/.
+
+    Layout: <repo>/atlas/bin/atlas  →  parent.parent
+    Falls back to CWD if the layout isn't found (still tries to import
+    proxy package from there).
+    """
+    here = Path(__file__).resolve().parent  # atlas/bin
+    candidate = here.parent.parent            # repo root
+    if (candidate / "proxy" / "main.py").is_file():
+        return candidate
+    cwd = Path.cwd().resolve()
+    if (cwd / "proxy" / "main.py").is_file():
+        return cwd
+    # Last resort — return what we think it is so error messages name it
+    return candidate
+
+
+REPO_ROOT = _find_repo_root()
+PROXY_PKG = REPO_ROOT / "proxy"
+DATA_DIR = REPO_ROOT / "data"
+VENV_PY = REPO_ROOT / ".venv" / "bin" / "python"
+PROXY_LOG_FILE = PROXY_PKG / "logs" / "atlas-proxy.log"
+# Service name matches the systemd unit the installer writes. Override with
+# ATLAS_SERVICE_NAME env var when this repo coexists with another atlas
+# install on the same box (e.g. ATLAS_SERVICE_NAME=atlas2-proxy.service).
+SERVICE_NAME = os.environ.get("ATLAS_SERVICE_NAME", "atlas-proxy.service")
+
+# ---------------------------------------------------------------------------
+# Bootstrap: self-install rich into repo-local venv on first run
+# ---------------------------------------------------------------------------
+def _bootstrap() -> None:
+    try:
+        import rich  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    if not VENV_PY.exists():
+        print("==> First run: creating virtualenv...")
+        subprocess.run([sys.executable, "-m", "venv", str(REPO_ROOT / ".venv")], check=True)
+        VENV_PY.parent.mkdir(parents=True, exist_ok=True)
+        req = REPO_ROOT / "requirements.txt"
+        if req.exists():
+            subprocess.run([str(VENV_PY), "-m", "pip", "install", "--quiet", "-r", str(req)], check=True)
+        else:
+            subprocess.run([str(VENV_PY), "-m", "pip", "install", "--quiet", "rich"], check=True)
+    else:
+        # Venv exists but rich missing — install just rich (idempotent)
+        subprocess.run([str(VENV_PY), "-m", "pip", "install", "--quiet", "rich"], check=False)
+
+    # Re-exec into venv python
+    os.execv(str(VENV_PY), [str(VENV_PY), __file__, *sys.argv[1:]])
+
+
+if __name__ == "__main__" and __package__ in (None, ""):
+    _bootstrap()
+
+from rich import box
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.prompt import Prompt, Confirm
+from rich.text import Text
+
+CONSOLE = Console()
+VERSION = "1.0.0"
+
+# ---------------------------------------------------------------------------
+# Styling helpers
+# ---------------------------------------------------------------------------
+def _c(code, text):
+    if not CONSOLE.is_terminal:
+        return text
+    return f"[{code}]{text}[/{code}]"
+def green(t):  return f"[green]{t}[/green]"
+def cyan(t):   return f"[cyan]{t}[/cyan]"
+def yellow(t): return f"[yellow]{t}[/yellow]"
+def red(t):    return f"[red]{t}[/red]"
+def bold(t):   return f"[bold]{t}[/bold]"
+def dim(t):    return f"[dim]{t}[/dim]"
+def checkmark(ok): return green("✔") if ok else red("✘")
+def warn(t):   return f"[yellow]⚠ {t}[/yellow]"
+def info(t):   return f"[cyan]ℹ {t}[/cyan]"
+def section(title):
+    CONSOLE.print()
+    CONSOLE.print(f"[bold underline]{title}[/bold underline]")
+    CONSOLE.print()
+
+
+def _run(cmd, check=True, capture=False, timeout=30, env=None):
+    try:
+        return subprocess.run(
+            cmd, capture_output=capture, text=True, check=check,
+            timeout=timeout, env=env,
+        )
+    except FileNotFoundError:
+        CONSOLE.print(red(f"ERR: command not found: {cmd[0]}"))
+        sys.exit(1)
+    except subprocess.TimeoutExpired:
+        CONSOLE.print(red(f"ERR: command timed out: {' '.join(cmd)}"))
+        sys.exit(1)
+    except subprocess.CalledProcessError as e:
+        CONSOLE.print(red(f"ERR: command failed (exit {e.returncode}): {' '.join(cmd)}"))
+        if e.stderr and capture:
+            CONSOLE.print(dim(e.stderr.strip()))
+        sys.exit(e.returncode)
+
+
+def has_systemctl() -> bool:
+    return shutil.which("systemctl") is not None
+
+
+def get_proxy_url() -> str:
+    return os.environ.get("ATLAS_PROXY_URL", "http://127.0.0.1:8788")
+
+
+def _resolve_listen() -> tuple[str, int]:
+    """Return (host, port) from .env / ATLAS_LISTEN_* / built-in default.
+
+    Runs the actual config import when possible — single source of truth.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from proxy.config import LISTEN_HOST, LISTEN_PORT
+        return LISTEN_HOST, LISTEN_PORT
+    except Exception:
+        h = os.environ.get("LISTEN_HOST", "0.0.0.0")
+        p = int(os.environ.get("LISTEN_PORT", "8788"))
+        return h, p
+
+
+# ---------------------------------------------------------------------------
+# Service management (systemd + user-mode fallback via run.sh)
+# ---------------------------------------------------------------------------
+def _current_runtime():
+    """Build the active Runtime impl — reads data/runtime.json, falls back to legacy."""
+    sys.path.insert(0, str(REPO_ROOT / "atlas"))
+    try:
+        from bin.runtime import get_runtime
+        return get_runtime(REPO_ROOT, VENV_PY, SERVICE_NAME)
+    except Exception as e:
+        CONSOLE.print(red(f"runtime detection failed: {e}"))
+        sys.exit(1)
+
+
+def service_action(action: str) -> bool:
+    """Dispatch start/stop/restart/status to the active runtime impl."""
+    rt = _current_runtime()
+    if action == "start":
+        ok, msg = rt.start()
+    elif action == "stop":
+        ok, msg = rt.stop()
+    elif action == "restart":
+        ok1, m1 = rt.stop()
+        time.sleep(1)
+        ok2, m2 = rt.start()
+        ok = ok1 and ok2
+        msg = f"{m1}; {m2}"
+    elif action == "status":
+        ok, msg = rt.status()
+    else:
+        ok, msg = False, f"unknown action: {action}"
+    CONSOLE.print((_c('green', 'OK') if ok else _c('red', 'ERR')) + f": {msg}")
+    return ok
+
+
+def is_service_active() -> bool:
+    rt = _current_runtime()
+    ok, _ = rt.status()
+    return ok
+
+
+def http_health(url: str) -> tuple[bool, str]:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            return True, f"{resp.status} {resp.reason}"
+    except Exception as e:
+        return False, str(e)
+
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+def cmd_install(args) -> int:
+    """Atlas proxy + coding-harness setup wizard.
+
+    Replaces the old "thin wrapper around install.sh" flow. Now drives:
+      harness detection/install → provider selection → key import →
+      harness configuration (with backups) → smoke test → launch.
+    """
+    import importlib
+    sys.path.insert(0, str(REPO_ROOT / "atlas"))
+    wizard = importlib.import_module("bin.setup_wizard")
+    return wizard.run_wizard(dry_run=getattr(args, "dry_run", False))
+
+
+def cmd_uninstall(args) -> int:
+    dry_run = getattr(args, "dry_run", False)
+    title = "Atlas proxy — uninstall (DRY-RUN)" if dry_run else "Atlas proxy — uninstall"
+    section(title)
+    if dry_run:
+        CONSOLE.print(yellow("  DRY-RUN — no changes will be made"))
+    script = REPO_ROOT / "setup" / "install.sh"
+    if not script.exists():
+        CONSOLE.print(red(f"ERR: installer not found at {script}"))
+        return 1
+    flags = ["--dry-run"] if dry_run else ["--uninstall"]
+    return subprocess.call(["bash", str(script), *flags])
+
+
+def cmd_start(args) -> int:
+    CONSOLE.print(f"{cyan('▶')} Starting proxy...")
+    return 0 if service_action("start") else 1
+
+
+def cmd_stop(args) -> int:
+    CONSOLE.print(f"{cyan('▶')} Stopping proxy...")
+    return 0 if service_action("stop") else 1
+
+
+def _write_runtime_provider(provider: str, model: str = "") -> None:
+    """Write data/proxy_data/runtime_provider.json — picked up by proxy on
+    next reload / restart."""
+    rp_dir = DATA_DIR / "proxy_data"
+    rp_dir.mkdir(parents=True, exist_ok=True)
+    rp_file = rp_dir / "runtime_provider.json"
+    config = {
+        "provider": provider,
+        "model": model,
+        "timestamp": int(time.time()),
+    }
+    rp_file.write_text(json.dumps(config, indent=2))
+    if model:
+        CONSOLE.print(dim(f"  runtime_provider.json → {provider} ({model})"))
+    else:
+        CONSOLE.print(dim(f"  runtime_provider.json → {provider}"))
+
+
+def cmd_restart(args) -> int:
+    provider = getattr(args, "provider", None)
+    model = getattr(args, "model", None) or ""
+    if provider:
+        section(f"Atlas proxy — restart [{provider}]" + (f" [{model}]" if model else ""))
+        _write_runtime_provider(provider, model)
+    else:
+        section("Atlas proxy — restart")
+    if not service_action("stop"):
+        return 1
+    time.sleep(1)
+    return 0 if service_action("start") else 1
+
+
+# "switch" — interactive model picker (replaces --provider/--model flags)
+def cmd_switch(args) -> int:
+    """Interactive provider + model switcher."""
+    sys.path.insert(0, str(REPO_ROOT / "atlas"))
+    try:
+        from bin.switch import cmd_switch as _switch_impl
+        return _switch_impl(args)
+    except Exception as e:
+        CONSOLE.print(red(f"switch failed: {e}"))
+        import traceback
+        CONSOLE.print(traceback.format_exc())
+        return 1
+
+
+def cmd_status(args) -> int:
+    section("Atlas proxy — status")
+    host, port = _resolve_listen()
+    url = f"http://{host if host not in ('0.0.0.0',) else '127.0.0.1'}:{port}"
+
+    rt = _current_runtime()
+    running, msg = rt.status()
+
+    table = Table(box=box.SIMPLE, show_header=False)
+    table.add_column(style="bold", width=18)
+    table.add_column()
+    table.add_row("Repo", str(REPO_ROOT))
+    table.add_row("Listen", f"{host}:{port}")
+    table.add_row("URL", url)
+    table.add_row("Platform", f"{platform.system().lower()} (root={'yes' if os.geteuid() == 0 else 'no'})")
+    table.add_row("Mode", cyan(rt.info.label))
+    if rt.info.session and rt.info.session != rt.info.label:
+        table.add_row("Session", rt.info.session)
+    table.add_row("Service", green(msg) if running else yellow(msg))
+    ok, http_msg = http_health(f"{url}/health")
+    table.add_row("/health", green(http_msg) if ok else red(http_msg))
+    ok2, http_msg2 = http_health(f"{url}/v1/models")
+    table.add_row("/v1/models", green(http_msg2) if ok2 else red(http_msg2))
+    CONSOLE.print(table)
+    return 0 if (ok or ok2 or running) else 1
+
+
+def cmd_logs(args) -> int:
+    section("Atlas proxy — logs")
+    rt = _current_runtime()
+    CONSOLE.print(dim(f"  mode: {rt.info.label}"))
+    return rt.logs(follow=True)
+
+
+def _check_item(name: str, ok: bool, detail: str = "") -> bool:
+    CONSOLE.print(f"  {checkmark(ok)} {name}" + (f"  {dim(detail)}" if detail else ""))
+    return ok
+
+
+def cmd_doctor(args) -> int:
+    section("Atlas proxy — doctor")
+    all_ok = True
+
+    # Repo & layout
+    all_ok &= _check_item("repo root", REPO_ROOT.is_dir(), str(REPO_ROOT))
+    all_ok &= _check_item("proxy package", (PROXY_PKG / "main.py").is_file())
+    for d in ("data/openrouter_data", "data/huggingface_data",
+              "data/proxy_data", "data/payloads", "proxy/logs"):
+        all_ok &= _check_item(d + "/", (REPO_ROOT / d).is_dir())
+
+    # Venv + deps
+    all_ok &= _check_item(".venv", VENV_PY.exists(), str(VENV_PY))
+    if VENV_PY.exists():
+        r = _run([str(VENV_PY), "-c", "import fastapi, uvicorn, httpx, orjson"],
+                 check=False, capture=True)
+        all_ok &= _check_item("deps importable", r.returncode == 0,
+                              r.stderr.strip() if r.returncode else "fastapi/uvicorn/httpx/orjson")
+
+    # Service / process — use the active runtime
+    rt = _current_runtime()
+    running, run_msg = rt.status()
+    all_ok &= _check_item(f"runtime={rt.info.label}", running, run_msg)
+
+    # HTTP
+    host, port = _resolve_listen()
+    url = f"http://{'127.0.0.1' if host in ('0.0.0.0',) else host}:{port}"
+    ok, msg = http_health(f"{url}/health")
+    all_ok &= _check_item(f"{url}/health responds", ok, msg)
+
+    # Key files (warn but don't fail)
+    or_keys = DATA_DIR / "openrouter_data" / "openroute_keys.txt"
+    hf_keys = DATA_DIR / "huggingface_data" / "hf_keys.txt"
+    if or_keys.exists():
+        n = sum(1 for ln in or_keys.read_text().splitlines() if ln.strip() and not ln.startswith("#"))
+        CONSOLE.print(f"  ℹ {cyan('OpenRouter keys')}: {n}")
+    else:
+        CONSOLE.print(f"  {warn('OpenRouter key file missing')}  ({or_keys})")
+    if hf_keys.exists():
+        n = sum(1 for ln in hf_keys.read_text().splitlines() if ln.strip() and not ln.startswith("#"))
+        CONSOLE.print(f"  ℹ {cyan('HuggingFace keys')}: {n}")
+    else:
+        CONSOLE.print(f"  {warn('HuggingFace key file missing')}  ({hf_keys})")
+
+    CONSOLE.print()
+    if all_ok:
+        CONSOLE.print(green("✔ doctor: all checks passed"))
+        return 0
+    CONSOLE.print(yellow("⚠ doctor: issues found (see above)"))
+    return 1
+
+
+def cmd_check(args) -> int:
+    """Thin wrapper around setup/install.sh --check (no colour spinner)."""
+    return subprocess.call(["bash", str(REPO_ROOT / "setup" / "install.sh"), "--check"])
+
+
+def cmd_config(args) -> int:
+    section("Atlas proxy — config")
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from proxy.config import (
+            LISTEN_HOST, LISTEN_PORT, PROVIDER, get_default_model,
+            KEY_FILE, HF_KEY_FILE, RUNTIME_PROVIDER_FILE,
+            SYSTEM_PROMPT_OVERRIDE_FILE, PAYLOAD_DIR, MAX_CONNECTIONS,
+        )
+    except Exception as e:
+        CONSOLE.print(red(f"ERR: could not import proxy.config: {e}"))
+        return 1
+
+    table = Table(box=box.SIMPLE, show_header=False, title=f"resolved at {time.strftime('%H:%M:%S')}")
+    table.add_column(style="bold", width=22)
+    table.add_column()
+    rows = [
+        ("provider", PROVIDER),
+        ("default_model", get_default_model()),
+        ("listen", f"{LISTEN_HOST}:{LISTEN_PORT}"),
+        ("key_file", KEY_FILE),
+        ("hf_key_file", HF_KEY_FILE),
+        ("runtime_provider", RUNTIME_PROVIDER_FILE),
+        ("prompt_override", SYSTEM_PROMPT_OVERRIDE_FILE),
+        ("payload_dir", PAYLOAD_DIR),
+        ("max_connections", str(MAX_CONNECTIONS)),
+    ]
+    for k, v in rows:
+        table.add_row(k, str(v))
+    CONSOLE.print(table)
+    return 0
+
+
+def cmd_version(args) -> int:
+    CONSOLE.print(f"atlas (proxy CLI) v{VERSION}")
+    CONSOLE.print(dim(f"  repo: {REPO_ROOT}"))
+    CONSOLE.print(dim(f"  python: {sys.executable.split('/')[-3:][-1] if '/.venv' in sys.executable else sys.version.split()[0]}"))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Key import — append+dedupe into the configured key file (NEVER overwrite)
+# ---------------------------------------------------------------------------
+def _resolve_key_file() -> Path:
+    """Resolve the live key file from proxy.config.
+
+    Never hardcode a path — KEY_FILE may be overridden by .env (KEY_FILE env
+    var) or ATLAS_HF_KEYS_FILE for HF. We honour whatever the proxy itself
+    reads at runtime so imports land in the same place.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from proxy.config import KEY_FILE  # noqa: WPS433
+        return Path(KEY_FILE)
+    except Exception as e:
+        CONSOLE.print(red(f"ERR: could not import proxy.config: {e}"))
+        raise SystemExit(1)
+
+
+def _read_existing_keys(path: Path) -> tuple[set[str], list[str]]:
+    """Read existing keys, preserving comments + blank lines.
+
+    Returns (set_of_keys, list_of_lines) — the line list is the raw text so
+    we can append without rewriting comments or destroying formatting.
+    """
+    if not path.exists():
+        return set(), []
+    raw = path.read_text().splitlines()
+    existing = set()
+    for ln in raw:
+        s = ln.strip()
+        if s and not s.startswith("#"):
+            existing.add(s)
+    return existing, raw
+
+
+def _summarise_import(existing: set[str], candidates: list[str], added: list[str]) -> None:
+    dupes = len(candidates) - len(added)
+    CONSOLE.print(f"  {cyan('Existing')}:    {len(existing) - len(added)}")
+    CONSOLE.print(f"  {cyan('Imported')}:    {len(candidates)}")
+    if dupes:
+        CONSOLE.print(f"  {cyan('Duplicates')}:  {dupes}")
+    CONSOLE.print(f"  {cyan('Added')}:       {len(added)}")
+    CONSOLE.print(f"  {cyan('Total')}:       {len(existing) + len(added)}")
+
+
+def _do_import_keys(candidates_raw: list[str], dry_run: bool, label: str) -> int:
+    """Shared body for import-key / import-key-file.
+
+    candidates_raw: list of strings as supplied (one key may be a multi-key line)
+    label:           short human label for the source (e.g. 'CLI arg' or path)
+    """
+    # Strip whitespace + blank lines, preserve order
+    candidates: list[str] = []
+    seen_in_batch: set[str] = set()
+    for raw in candidates_raw:
+        for piece in raw.replace(",", "\n").splitlines():
+            s = piece.strip()
+            if s and not s.startswith("#") and s not in seen_in_batch:
+                seen_in_batch.add(s)
+                candidates.append(s)
+
+    if not candidates:
+        CONSOLE.print(yellow(f"  No keys found in {label}"))
+        return 1
+
+    key_file = _resolve_key_file()
+    existing, raw_lines = _read_existing_keys(key_file)
+
+    # Dedupe against existing file
+    new_keys = [k for k in candidates if k not in existing]
+
+    section(f"Atlas proxy — import keys{' (DRY-RUN)' if dry_run else ''}")
+    CONSOLE.print(f"  Source: {cyan(label)}")
+    CONSOLE.print(f"  Target: {cyan(str(key_file))}")
+    if dry_run:
+        CONSOLE.print(yellow("  DRY-RUN — no changes will be written"))
+
+    _summarise_import(existing, candidates, new_keys)
+
+    if not new_keys:
+        CONSOLE.print(green("  ✓ nothing to add — all keys already present"))
+        return 0
+
+    if dry_run:
+        CONSOLE.print(dim(f"  would append {len(new_keys)} key(s)"))
+        return 0
+
+    # Ensure trailing newline exists, then append. Preserve comments/blank lines
+    # in the existing file; never rewrite it.
+    suffix = "" if (raw_lines and raw_lines[-1] == "") else "\n"
+    with key_file.open("a", encoding="utf-8") as fh:
+        fh.write(suffix + "\n".join(new_keys) + "\n")
+    CONSOLE.print(green(f"  ✓ appended {len(new_keys)} key(s) to {key_file.name}"))
+    return 0
+
+
+def cmd_import_key(args) -> int:
+    """Import a single key from the CLI (one or more, comma/newline separated)."""
+    keys = [args.key]
+    return _do_import_keys(keys, args.dry_run, label="<cli>")
+
+
+def cmd_import_key_file(args) -> int:
+    """Import keys from a file (one key per line; # comments + blank lines OK)."""
+    path = Path(args.path).expanduser()
+    if not path.exists():
+        CONSOLE.print(red(f"ERR: file not found: {path}"))
+        return 1
+    raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return _do_import_keys(raw, args.dry_run, label=str(path))
+
+
+# ---------------------------------------------------------------------------
+# Argparse — fuzzy-matched subcommands
+# ---------------------------------------------------------------------------
+SUBCOMMANDS = {
+    "install":         cmd_install,
+    "uninstall":       cmd_uninstall,
+    "start":           cmd_start,
+    "stop":            cmd_stop,
+    "restart":         cmd_restart,
+    "switch":          cmd_switch,
+    "status":          cmd_status,
+    "st":              cmd_status,
+    "logs":            cmd_logs,
+    "log":             cmd_logs,
+    "doctor":          cmd_doctor,
+    "check":           cmd_check,
+    "config":          cmd_config,
+    "version":         cmd_version,
+    "import-key":      cmd_import_key,
+    "import-key-file": cmd_import_key_file,
+    "--version":       cmd_version,
+    "-v":              cmd_version,
+}
+
+
+def _fuzzy_command(name: str) -> str | None:
+    m = difflib.get_close_matches(name, SUBCOMMANDS.keys(), n=1, cutoff=0.5)
+    return m[0] if m else None
+
+
+HELP_TEXT = f"""
+[bold underline]ATLAS — Atlas Translation Proxy CLI[/bold underline]
+
+[dim]Repo-location agnostic — finds the proxy package from this script's path.[/dim]
+
+[bold]Lifecycle[/bold]
+  [cyan]atlas[/cyan] install              Atlas proxy + coding-harness setup wizard
+  [cyan]atlas[/cyan] install --dry-run    Preview the wizard without changes
+  [cyan]atlas[/cyan] uninstall            Remove systemd unit + cleanup
+  [cyan]atlas[/cyan] uninstall --dry-run  Preview removal without changes
+  [cyan]atlas[/cyan] start                Start the proxy
+  [cyan]atlas[/cyan] stop                 Stop the proxy
+  [cyan]atlas[/cyan] restart              Restart (keeps current provider)
+  [cyan]atlas[/cyan] restart --huggingface  Switch to HF on next start
+  [cyan]atlas[/cyan] restart --openrouter   Switch back to OpenRouter
+  [cyan]atlas[/cyan] restart --huggingface --model PROVIDER/MODEL
+
+[bold]Insight[/bold]
+  [cyan]atlas[/cyan] status               Service + HTTP + key summary
+  [cyan]atlas[/cyan] logs                 Tail logs (journald or file)
+  [cyan]atlas[/cyan] config               Show resolved config values
+  [cyan]atlas[/cyan] doctor               Diagnose common problems
+  [cyan]atlas[/cyan] check                Thin wrapper around setup/install.sh --check
+
+[bold]Keys[/bold]
+  [cyan]atlas[/cyan] import-key <KEY>      Append a single key to the key file
+  [cyan]atlas[/cyan] import-key-file <PATH>  Append keys from a file (one per line)
+  [cyan]atlas[/cyan] import-key-file <PATH> --dry-run  Preview without writing
+  [dim]Imports are append+dedupe — the existing key file is never overwritten.[/dim]
+
+[bold]Misc[/bold]
+  [cyan]atlas[/cyan] version              Print version + paths
+
+[dim]Fuzzy-matched: 'atlas srt' → restart, 'atlas satus' → status.[/dim]
+"""
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="atlas",
+        description="Atlas Translation Proxy CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+examples:
+  atlas start                          Start the proxy
+  atlas stop                           Stop the proxy
+  atlas restart --openrouter minimax/mimax-m3:free  Restart + switch provider+model
+  atlas switch --nvidia                Restart + NVIDIA provider
+  atlas switch --huggingface --skip    Restart + HF (no model override)
+  atlas install --dry-run              Preview the install without changes
+  atlas uninstall --dry-run            Preview the removal without changes
+  atlas import-key sk-or-v1-xxx        Append a single key to the key file
+  atlas import-key-file ~/keys.txt     Append keys from a file (one per line)
+  atlas import-key-file ~/keys.txt --dry-run   Preview without writing\
+""",
+    )
+    sub = p.add_subparsers(dest="command", metavar="<command>")
+
+    # restart / switch — provider flags + positional model
+    for subparser_name, cmd_func in (("restart", cmd_restart), ("switch", cmd_switch)):
+        sp = sub.add_parser(subparser_name,
+                            help="Restart the proxy" if subparser_name == "restart" else "Switch provider + model")
+        sp.add_argument("--openrouter", action="store_const", const="openrouter", dest="provider",
+                         help="Switch to OpenRouter provider")
+        sp.add_argument("--nvidia", action="store_const", const="nvidia", dest="provider",
+                         help="Switch to NVIDIA provider")
+        sp.add_argument("--huggingface", action="store_const", const="huggingface", dest="provider",
+                         help="Switch to HuggingFace provider")
+        sp.add_argument("--skip", action="store_const", const="skip", dest="provider",
+                         help="Restart without a provider override")
+        sp.add_argument("model", nargs="?", default=None,
+                         help="Model to route through the provider (e.g. minimax/mimax-m3:free)")
+        sp.set_defaults(_atlas_cmd=cmd_func)
+
+    # install / uninstall accept --dry-run
+    sp_install = sub.add_parser("install", help="First-time setup (venv + systemd)")
+    sp_install.add_argument("--dry-run", action="store_true", dest="dry_run",
+                            help="Preview what install would do without making changes")
+
+    sp_uninstall = sub.add_parser("uninstall", help="Remove systemd unit + cleanup")
+    sp_uninstall.add_argument("--dry-run", action="store_true", dest="dry_run",
+                              help="Preview what uninstall would do without making changes")
+
+    # start / stop / status / logs: examples already covered in main epilog
+    for name in ("start", "stop", "status", "st",
+                 "logs", "log", "doctor", "check", "config", "version"):
+        sub.add_parser(name, help=f"{name} the proxy")
+
+    # import-key / import-key-file
+    sp_ik = sub.add_parser("import-key", help="Append a single API key to the key file")
+    sp_ik.add_argument("key", help="API key string (or comma-separated list)")
+    sp_ik.add_argument("--dry-run", action="store_true", dest="dry_run",
+                       help="Preview what would be added without writing")
+
+    sp_ikf = sub.add_parser("import-key-file", help="Append keys from a file (one per line)")
+    sp_ikf.add_argument("path", help="Path to a text file of keys")
+    sp_ikf.add_argument("--dry-run", action="store_true", dest="dry_run",
+                        help="Preview what would be added without writing")
+
+    return p
+
+
+def main() -> int:
+    if len(sys.argv) == 1 or sys.argv[1] in ("-h", "--help", "help"):
+        CONSOLE.print(Panel(HELP_TEXT, border_style="cyan", box=box.ROUNDED))
+        return 0
+
+    # Special-case --version / -v before argparse so they don't get fuzzed
+    if sys.argv[1] in ("--version", "-v"):
+        return cmd_version(None)
+
+    parser = build_parser()
+    args = parser.parse_args(sys.argv[1:])
+    handler = getattr(args, "_atlas_cmd", None) or SUBCOMMANDS.get(args.command)
+    if handler is None and hasattr(args, "command"):
+        # Fuzzy match
+        suggestion = _fuzzy_command(args.command)
+        if suggestion:
+            CONSOLE.print(yellow(f"Unknown command '{args.command}' — did you mean '{suggestion}'?"))
+            if Confirm.ask("Run it?", default=True):
+                handler = SUBCOMMANDS[suggestion]
+    if handler is None:
+        CONSOLE.print(red(f"Unknown command: {sys.argv[1]}"))
+        CONSOLE.print(dim("Run 'atlas --help' for the command list."))
+        return 2
+    try:
+        return handler(args)
+    except KeyboardInterrupt:
+        CONSOLE.print()
+        CONSOLE.print(yellow("interrupted"))
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())
