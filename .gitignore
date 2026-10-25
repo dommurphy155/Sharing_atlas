@@ -16,3 +16,8 @@ openroute_keys.txt
 __pycache__/
 *.pyc
 *.pyo
+
+# Editor swap/backup files — never commit
+*.swp
+*.swo
+*~

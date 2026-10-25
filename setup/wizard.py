@@ -710,17 +710,24 @@ def run_wizard(repo: Path, dry_run: bool = False, harness: str | None = None,
 
     # 3. Background install (only when we actually picked a harness)
     os_name = core.detect_os()
-    proc = None if dry_run else _start_install(h, os_name)
-    # 4. Finalize harness install (verify + config)
+    already_installed = shutil.which(h.bin) is not None
+    if already_installed:
+        proc = None  # harness present — skip (re)install, just re-wire configs
+    else:
+        proc = None if dry_run else _start_install(h, os_name)
+    # 4. Finalize harness install / configure (verify + config)
     if proc is not None or dry_run:
         ok, msg = _finalize_install(h, proc, dry_run)
         CONSOLE.print(("  [green]✔[/green]" if ok else "  [red]✘[/red]") + f" {h.label}: {msg}")
         installed = ok and shutil.which(h.bin) is not None
         if not installed:
             CONSOLE.print(f"[yellow]⚠ {h.label} install failed — launch will be skipped.[/yellow]")
+    elif already_installed:
+        installed = True
+        CONSOLE.print(f"[green]✔ {h.label} already installed — wiring to proxy (skipping install)[/green]")
     else:
-        installed = shutil.which(h.bin) is not None
-        CONSOLE.print(("  [green]✔[/green]" if installed else "  [yellow]⚠[/yellow]") + f" {h.label} already installed")
+        installed = False
+        CONSOLE.print(f"[yellow]⚠ {h.label} not found after install[/yellow]")
     # 5. Verify
     results = _verify(repo, h, has_keys, dry_run)
     all_ok = _render_results(results)
