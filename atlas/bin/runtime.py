@@ -63,10 +63,10 @@ class RuntimeEnv:
     systemd_pid1: bool
     has_user_systemd: bool
     has_loginctl: bool
-    has_launchctl: bool = False  # macOS launchd availability
-    has_tasklist: bool = False  # Windows schtasks availability
     tmux_bin: str | None  # first tmux-equivalent on PATH
     has_nohup: bool
+    has_launchctl: bool = False  # macOS launchd availability
+    has_tasklist: bool = False  # Windows schtasks availability
 
     # Convenience derivations
     @property
