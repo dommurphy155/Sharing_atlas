@@ -24,3 +24,5 @@ __pycache__/
 
 # Installer log (debugging artifact; lives per-install dir)
 .installer.log
+
+.windows-installer-backup-*/
