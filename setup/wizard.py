@@ -69,7 +69,7 @@ def _clear_windows_key_files(repo):
     for path in unique.values():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("", encoding="utf-8")
-    console.print(f"[dim]Cleared {len(unique)} configured key file(s).[/dim]")
+    CONSOLE.print(f"[dim]Cleared {len(unique)} configured key file(s).[/dim]")
 
 def _collect_keys(repo: Path) -> list[str]:
     """Prompt the user for OpenRouter API keys. Returns the full key list."""
