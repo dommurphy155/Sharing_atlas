@@ -905,9 +905,54 @@ class WindowsRuntime:
         return str(self.venv_py)
 
     def install(self) -> tuple[bool, str]:
-        # Remove a pre-existing task with the same name (idempotent), then
-        # register a fresh one.
-        return self.start()
+        """Register a persistent per-user logon task, then start the proxy."""
+        import subprocess
+
+        data_dir = self.repo_root / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        wrapper = data_dir / "atlas-start.cmd"
+        cli = self.repo_root / "atlas" / "bin" / "atlas"
+        startup_log = data_dir / "startup.log"
+
+        wrapper.write_text(
+            "@echo off\r\n"
+            f'cd /d "{self.repo_root}"\r\n'
+            f'"{self.venv_py}" "{cli}" start >> "{startup_log}" 2>&1\r\n',
+            encoding="utf-8",
+            newline="",
+        )
+
+        task_action = f'cmd.exe /d /c ""{wrapper}""'
+
+        try:
+            result = subprocess.run(
+                [
+                    "schtasks", "/Create", "/F",
+                    "/SC", "ONLOGON",
+                    "/TN", self.TASK_NAME,
+                    "/TR", task_action,
+                    "/RL", "LIMITED",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+            )
+
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip()
+                return False, f"Could not register logon task: {detail}"
+
+        except Exception as exc:
+            return False, f"Could not register logon task: {exc}"
+
+        ok, message = self.start()
+        if not ok:
+            return False, f"Logon task registered, but proxy failed to start: {message}"
+
+        return True, f"Logon task registered; {message}"
 
     def _schtasks(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess | None:
         return _run_quiet(["schtasks", *args], timeout=10.0)

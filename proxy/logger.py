@@ -63,7 +63,26 @@ class JsonFormatter(logging.Formatter):
 # ---------------------------------------------------------------------------
 # Root logger setup (runs on import)
 # ---------------------------------------------------------------------------
-_handler = logging.StreamHandler(sys.stdout)
+class SafeStreamHandler(logging.StreamHandler):
+    """Keep console logging alive when Windows cannot encode a character."""
+
+    def emit(self, record):
+        try:
+            message = self.format(record) + self.terminator
+            try:
+                self.stream.write(message)
+            except UnicodeEncodeError:
+                encoding = getattr(self.stream, "encoding", None) or "utf-8"
+                safe_message = message.encode(
+                    encoding, errors="backslashreplace"
+                ).decode(encoding)
+                self.stream.write(safe_message)
+            self.flush()
+        except Exception:
+            self.handleError(record)
+
+
+_handler = SafeStreamHandler(sys.stdout)
 if LOG_JSON:
     _handler.setFormatter(JsonFormatter())
 else:
