@@ -56,7 +56,7 @@ def _clear_windows_key_files(repo):
         from proxy import config
         paths.extend((Path(config.KEY_FILE), Path(config.FALLBACK_KEY_FILE)))
     except Exception as exc:
-        console.print(f"[yellow]Could not load configured key paths: {exc}[/yellow]")
+        CONSOLE.print(f"[yellow]Could not load configured key paths: {exc}[/yellow]")
 
     unique = {}
     for path in paths:
