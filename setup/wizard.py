@@ -273,6 +273,9 @@ def run_wizard(repo: Path, venv_py: Path) -> int:
         shim_ok, shim_msg = _install_cli_shim(repo, osmod)
         shim_style = "[green]✓[/green]" if shim_ok else "[red]✘[/red]"
         CONSOLE.print(f"  {shim_style} {shim_msg}")
+        if core.is_windows() and not shim_ok:
+            CONSOLE.print("[red]Windows CLI installation failed; setup cannot be marked successful.[/red]")
+            return 1
 
     # ---- Step 6: Summary + exit ----
     _show_summary(repo, added, total, True, message)

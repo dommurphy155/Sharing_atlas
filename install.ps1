@@ -202,5 +202,31 @@ if ($WizardExitCode -ne 0) {
     Stop-Installer "Setup wizard failed." $WizardExitCode
 }
 
+# ---- Refresh and verify the Atlas CLI in this PowerShell session
+$AtlasShim = Join-Path $HOME ".local\bin\atlas.cmd"
+if (-not (Test-Path $AtlasShim -PathType Leaf)) {
+    Stop-Installer "Atlas CLI launcher was not created: $AtlasShim" 1
+}
+
+$AtlasBin = Split-Path $AtlasShim -Parent
+$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$PathEntries = @($UserPath -split ";" | Where-Object { $_.Trim() })
+if (-not ($PathEntries | Where-Object {
+    [string]::Equals($_.Trim().TrimEnd("\"), $AtlasBin.TrimEnd("\"), [StringComparison]::OrdinalIgnoreCase)
+})) {
+    $UpdatedUserPath = (@($PathEntries) + $AtlasBin) -join ";"
+    [Environment]::SetEnvironmentVariable("Path", $UpdatedUserPath, "User")
+}
+if (-not (($env:Path -split ";" | Where-Object {
+    [string]::Equals($_.Trim().TrimEnd("\"), $AtlasBin.TrimEnd("\"), [StringComparison]::OrdinalIgnoreCase)
+}))) {
+    $env:Path = "$AtlasBin;$env:Path"
+}
+
+if (-not (Get-Command atlas -ErrorAction SilentlyContinue)) {
+    Stop-Installer "Atlas launcher exists but 'atlas' cannot be resolved from PATH." 1
+}
+Write-Host "-> Atlas CLI verified: $AtlasShim"
+
 Write-Host "-> installer finished successfully"
 exit 0

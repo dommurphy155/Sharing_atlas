@@ -129,10 +129,11 @@ def make_windows_shim(repo, bin_dir):
 
     bin_dir.mkdir(parents=True, exist_ok=True)
     shim.write_text(
-        '@echo off\\r\\n'
-        f'"{python}" "{target}" %*\\r\\n'
-        'exit /b %ERRORLEVEL%\\r\\n',
+        '@echo off\r\n'
+        f'"{python}" "{target}" %*\r\n'
+        'exit /b %ERRORLEVEL%\r\n',
         encoding="utf-8",
+        newline="",
     )
 
     try:
@@ -147,14 +148,16 @@ def make_windows_shim(repo, bin_dir):
 
             entries = [x.strip().strip('"') for x in user_path.split(";") if x.strip()]
             norm = os.path.normcase(os.path.normpath(str(bin_dir)))
-            if not any(os.path.normcase(os.path.normpath(x)) == norm for x in entries):
+            if not any(
+                os.path.normcase(os.path.normpath(os.path.expandvars(x))) == norm
+                for x in entries
+            ):
                 entries.append(str(bin_dir))
                 winreg.SetValueEx(key, "Path", 0, value_type, ";".join(entries))
 
-        return True, f"Installed {shim}; user PATH updated. Open a new terminal."
+        return True, f"Installed {shim} and registered its directory in user PATH."
     except Exception as exc:
-        return True, f"Installed {shim}, but could not update user PATH: {exc}"
-
+        return False, f"Could not register Atlas in user PATH: {exc}"
 
 def _chmodx(path: Path) -> None:
     """Ensure the POSIX wrapper is executable."""
