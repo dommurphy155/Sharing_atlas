@@ -1,7 +1,7 @@
 """Interactive `atlas switch` command — provider + model picker.
 
 Flow:
-  1. Provider menu (OpenRouter / NVIDIA / Hugging Face)
+  1. Provider menu (OpenRouter / NVIDIA)
   2. Fetch live models for the chosen provider (cached, 6h TTL)
   3. Numbered model list with search-by-substring
   4. Save the selection via the existing runtime_provider.json mechanism
@@ -313,7 +313,7 @@ def _render_model_table_paginated(page_items, favs, start_offset=0) -> tuple[Tab
 
 
 def _cache_slug_for_provider(provider_label: str) -> str:
-    return {"OpenRouter": "openrouter", "NVIDIA": "nvidia", "Hugging Face": "huggingface"}.get(
+    return {"OpenRouter": "openrouter", "NVIDIA": "nvidia"}.get(
         provider_label, provider_label.lower()
     )
 
@@ -347,13 +347,11 @@ async def _fetch_for_provider(provider_slug: str):
         return await models_mod.openrouter_models(REPO_ROOT, free_only=True)
     if provider_slug == "nvidia":
         return await models_mod.nvidia_models(REPO_ROOT)
-    if provider_slug == "huggingface":
-        return await models_mod.huggingface_models(REPO_ROOT)
     return []
 
 
 def _slug(label: str) -> str:
-    return {"OpenRouter": "openrouter", "NVIDIA": "nvidia", "Hugging Face": "huggingface"}.get(label, label.lower())
+    return {"OpenRouter": "openrouter", "NVIDIA": "nvidia"}.get(label, label.lower())
 
 
 def _do_restart() -> None:

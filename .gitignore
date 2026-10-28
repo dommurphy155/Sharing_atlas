@@ -21,3 +21,6 @@ __pycache__/
 *.swp
 *.swo
 *~
+
+# Installer log (debugging artifact; lives per-install dir)
+.installer.log

@@ -57,7 +57,7 @@ try:
     allok &= ok("proxy config", True, f"{LISTEN_HOST}:{LISTEN_PORT} provider={PROVIDER}")
 except Exception as e:
     allok &= ok("proxy config", False, str(e))
-for prov,f in [("openrouter",repo/"data/openrouter_data/openroute_keys.txt"),("huggingface",repo/"data/huggingface_data/hf_keys.txt"),("nvidia",repo/"data/nvda_data/keys.txt")]:
+for prov,f in [("openrouter",repo/"data/openrouter_data/openroute_keys.txt"),("nvidia",repo/"data/nvda_data/keys.txt")]:
     n=0
     if (f).exists():
         n=sum(1 for ln in f.read_text().splitlines() if ln.strip() and not ln.startswith("#"))

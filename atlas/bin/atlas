@@ -8,8 +8,8 @@ proxy package.  Subcommands cover the full proxy lifecycle:
     atlas doctor / check / config / version
 
 When run via the symlink at /usr/local/bin/atlas, it is hard-scoped to
-this proxy repo only — nothing in this CLI touches OpenRouter / NVIDIA /
-HuggingFace automation (those live in the full Atlas bundle, not here).
+this proxy repo only — nothing in this CLI touches OpenRouter / NVIDIA
+automation (those live in the full Atlas bundle, not here).
 """
 from __future__ import annotations
 
@@ -341,7 +341,7 @@ def cmd_doctor(args) -> int:
     # Repo & layout
     all_ok &= _check_item("repo root", REPO_ROOT.is_dir(), str(REPO_ROOT))
     all_ok &= _check_item("proxy package", (PROXY_PKG / "main.py").is_file())
-    for d in ("data/openrouter_data", "data/huggingface_data",
+    for d in ("data/openrouter_data",
               "data/proxy_data", "data/payloads", "proxy/logs"):
         all_ok &= _check_item(d + "/", (REPO_ROOT / d).is_dir())
 
@@ -366,17 +366,11 @@ def cmd_doctor(args) -> int:
 
     # Key files (warn but don't fail)
     or_keys = DATA_DIR / "openrouter_data" / "openroute_keys.txt"
-    hf_keys = DATA_DIR / "huggingface_data" / "hf_keys.txt"
     if or_keys.exists():
         n = sum(1 for ln in or_keys.read_text().splitlines() if ln.strip() and not ln.startswith("#"))
         CONSOLE.print(f"  ℹ {cyan('OpenRouter keys')}: {n}")
     else:
         CONSOLE.print(f"  {warn('OpenRouter key file missing')}  ({or_keys})")
-    if hf_keys.exists():
-        n = sum(1 for ln in hf_keys.read_text().splitlines() if ln.strip() and not ln.startswith("#"))
-        CONSOLE.print(f"  ℹ {cyan('HuggingFace keys')}: {n}")
-    else:
-        CONSOLE.print(f"  {warn('HuggingFace key file missing')}  ({hf_keys})")
 
     CONSOLE.print()
     if all_ok:
@@ -429,7 +423,7 @@ def cmd_config(args) -> int:
     try:
         from proxy.config import (
             LISTEN_HOST, LISTEN_PORT, PROVIDER, get_default_model,
-            KEY_FILE, HF_KEY_FILE, RUNTIME_PROVIDER_FILE,
+            KEY_FILE, RUNTIME_PROVIDER_FILE,
             SYSTEM_PROMPT_OVERRIDE_FILE, PAYLOAD_DIR, MAX_CONNECTIONS,
         )
     except Exception as e:
@@ -444,7 +438,6 @@ def cmd_config(args) -> int:
         ("default_model", get_default_model()),
         ("listen", f"{LISTEN_HOST}:{LISTEN_PORT}"),
         ("key_file", KEY_FILE),
-        ("hf_key_file", HF_KEY_FILE),
         ("runtime_provider", RUNTIME_PROVIDER_FILE),
         ("prompt_override", SYSTEM_PROMPT_OVERRIDE_FILE),
         ("payload_dir", PAYLOAD_DIR),
@@ -619,7 +612,6 @@ HELP_TEXT = f"""
   [cyan]atlas[/cyan] start                Start the proxy
   [cyan]atlas[/cyan] stop                 Stop the proxy
   [cyan]atlas[/cyan] restart              Restart (keeps current provider)
-  [cyan]atlas[/cyan] restart --huggingface  Switch to HF on next start
   [cyan]atlas[/cyan] restart --openrouter   Switch back to OpenRouter
   [cyan]atlas[/cyan] restart --huggingface --model PROVIDER/MODEL
 
@@ -654,7 +646,6 @@ examples:
   atlas stop                           Stop the proxy
   atlas restart --openrouter minimax/mimax-m3:free  Restart + switch provider+model
   atlas switch --nvidia                Restart + NVIDIA provider
-  atlas switch --huggingface --skip    Restart + HF (no model override)
   atlas install --dry-run              Preview the install without changes
   atlas uninstall --dry-run            Preview the removal without changes
   atlas import-key sk-or-v1-xxx        Append a single key to the key file

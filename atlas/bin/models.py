@@ -1,9 +1,9 @@
 """Atlas model discovery, ranking and caching layer.
 
-Reusable abstraction over the three upstream model catalogues:
-OpenRouter, NVIDIA, HuggingFace.  All three are PUBLIC APIs — no
-auth required.  Each provider has a parser, a discovery entry point,
-and ranking is shared via `rank()` + `filter_relevant()`.
+Reusable abstraction over the upstream model catalogues:
+OpenRouter and NVIDIA.  Both are PUBLIC APIs — no auth required.
+Each provider has a parser, a discovery entry point, and ranking is
+shared via `rank()` + `filter_relevant()`.
 
 Public surface:
     Model          — dataclass holding a single model's metadata
@@ -11,7 +11,6 @@ Public surface:
     filter_relevant() — drop embeddings/audio/speech/moderation/rerank
     openrouter_models()  — async, returns list[Model] for OpenRouter
     nvidia_models()      — async, returns list[Model] for NVIDIA
-    huggingface_models() — async, returns list[Model] for HF
     PROVIDER_MENU  — list of ProviderMenu entries for the picker
 """
 from __future__ import annotations
@@ -36,7 +35,7 @@ class Model:
     """A single model returned by a provider catalogue."""
     id: str
     name: str
-    provider: str                              # "openrouter" | "nvidia" | "huggingface"
+    provider: str                              # "openrouter" | "nvidia"
     pricing: dict = field(default_factory=dict)   # raw pricing dict (strings → float)
     context_length: int = 0
     modalities: list[str] = field(default_factory=list)  # ["text"], ["text","image"], etc.
@@ -390,127 +389,12 @@ def _parse_nvidia(item: dict) -> Model:
 
 
 # ---------------------------------------------------------------------------
-# HuggingFace
-# ---------------------------------------------------------------------------
-
-HF_URL = "https://huggingface.co/api"
-# Curated list of inference providers to query (each returns its own catalogue).
-HF_PROVIDERS = ["deepinfra", "together", "fireworks-ai", "replicate", "nebius"]
-
-
-async def _fetch_hf_raw(provider: str, limit: int = 200) -> list[dict]:
-    async with httpx.AsyncClient(timeout=20.0) as c:
-        r = await c.get(f"{HF_URL}/models?inference_provider={provider}&limit={limit}")
-        r.raise_for_status()
-        return r.json()
-
-
-async def huggingface_models(repo_root: Path, ttl: int = CACHE_TTL_SECONDS,
-                              providers: list[str] | None = None) -> list[Model]:
-    """Fetch HuggingFace models across curated inference providers.
-
-    Public API, no key needed for the public catalogue.
-    """
-    cached = load_cached(repo_root, "huggingface", ttl)
-    if cached is not None:
-        return rank(cached)
-
-    if providers is None:
-        providers = HF_PROVIDERS
-
-    by_id: dict[str, Model] = {}
-    for provider in providers:
-        try:
-            rows = await _fetch_hf_raw(provider)
-        except httpx.HTTPError:
-            continue
-        for rank_idx, item in enumerate(rows):
-            mid = item.get("id")
-            if not mid:
-                continue
-            hint = max(0.0, 1.0 - (rank_idx / max(len(rows), 1)))
-            existing = by_id.get(mid)
-            if existing is None or hint > existing.score_hint:
-                parsed = _parse_hf(item, provider)
-                # Replace score_hint with provider signal
-                object.__setattr__(parsed, "score_hint", hint)
-                by_id[mid] = parsed
-
-    models = list(by_id.values())
-    models = filter_relevant(models)
-    models = rank(models)
-    save_cache(repo_root, "huggingface", models)
-    return models
-
-
-_HF_BAD_PIPELINES = {
-    "feature-extraction", "sentence-similarity", "text-to-image",
-    "text-to-video", "image-to-text", "image-to-image", "image-to-video",
-    "audio-to-audio", "audio-classification", "text-to-speech",
-    "automatic-speech-recognition", "text-classification",
-    "token-classification", "translation", "summarization",
-    "fill-mask", "zero-shot-classification", "reinforcement-learning",
-    "robotics", "tabular-classification", "tabular-regression",
-    "voice-activity-detection", "depth-estimation", "object-detection",
-    "image-classification", "image-segmentation", "keypoint-detection",
-}
-
-
-def _parse_hf(item: dict, provider: str) -> Model:
-    mid = item.get("id", "")
-    name = mid.split("/")[-1] if "/" in mid else mid
-    pipeline = item.get("pipeline_tag", "") or ""
-    tags = item.get("tags", []) or []
-
-    # Determine modalities from pipeline_tag + tags.
-    if pipeline in _HF_BAD_PIPELINES:
-        if "image" in pipeline:
-            modalities = ["text", "image"]   # multimodal
-        else:
-            modalities = ["text"]            # filtered out by filter_relevant
-    elif pipeline in ("text-generation", "conversational", "text2text-generation"):
-        if "image" in tags or "multimodal" in tags:
-            modalities = ["text", "image"]
-        else:
-            modalities = ["text"]
-    else:
-        modalities = ["text"]
-
-    tasks = []
-    blob = " ".join([mid, name, pipeline] + tags).lower()
-    if "code" in blob or "coder" in blob:
-        tasks.append("coding")
-    if "instruct" in blob or "chat" in blob or pipeline == "conversational":
-        tasks.append("conversational")
-    if "reason" in blob or "thinking" in blob or "r1" in blob.split("/")[-1]:
-        tasks.append("reasoning")
-    if "agent" in blob or "tool" in blob:
-        tasks.append("agentic")
-    if not tasks:
-        tasks = ["conversational"]
-
-    return Model(
-        id=mid,
-        name=name,
-        provider=provider,
-        pricing={},
-        context_length=0,
-        modalities=modalities,
-        tasks=tasks,
-        architecture="",
-        benchmarks={},
-        score_hint=0.0,
-        raw=item,
-    )
-
-
-# ---------------------------------------------------------------------------
 # Provider menu
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class ProviderMenu:
-    key: str           # "openrouter" | "nvidia" | "huggingface"
+    key: str           # "openrouter" | "nvidia"
     label: str         # "OpenRouter"
     description: str
 
@@ -518,5 +402,4 @@ class ProviderMenu:
 PROVIDER_MENU = [
     ProviderMenu("openrouter", "OpenRouter", "400+ models, free tier, agentic leaderboard"),
     ProviderMenu("nvidia", "NVIDIA", "NIM inference endpoints, no key required"),
-    ProviderMenu("huggingface", "Hugging Face", "Inference Providers — frontier models, free tier"),
 ]

@@ -163,7 +163,6 @@ def status_mark(status: int) -> Tuple[str, str]:
 _PROVIDER_SHORT = {
     "openai": "OPENAI",
     "anthropic": "ANTHROPIC",
-    "huggingface": "HF",
     "openrouter": "OPENROUTER",
     "nvidia": "NV",
 }

@@ -31,9 +31,6 @@ from .config import (
     UPSTREAM_TITLE,
     WRITE_TIMEOUT,
     get_default_model,
-    is_hf_rate_limit_error,
-    is_hf_key_invalid,
-    retire_and_remove_hf_key,
     get_logger,
 )
 from .keypool import KeyPool
@@ -66,8 +63,8 @@ def _enforce_default_model(body: Optional[bytes]) -> Optional[bytes]:
     in the JSON body — is unconditionally replaced with the active provider's
     hardcoded default model. This guarantees that client-supplied model
     names (e.g. "claude-sonnet-5") can never reach the upstream provider
-    regardless of endpoint, streaming mode, or provider (OpenRouter /
-    Hugging Face). Returns the body unchanged if it is None or not JSON.
+    regardless of endpoint, streaming mode, or provider. Returns the body
+    unchanged if it is None or not JSON.
     """
     if not get_force_default_model() or body is None:
         return body
@@ -398,28 +395,8 @@ class ProxyCore:
                     if isinstance(result, StreamingResponse):
                         return result
                     # Streaming upstream failures normally retry only for
-                    # RETRY_STATUSES. Hugging Face has an additional permanent
-                    # key-failure path (for example HTTP 402): _stream_forward()
-                    # retires that key, so we must also retry here and allow
-                    # next_key() to select the replacement key.
-                    stream_hf_key_failure = False
-                    if self.provider == "huggingface" and result.status_code >= 400:
-                        try:
-                            error_body = bytes(result.body)
-                            stream_hf_key_failure = (
-                                is_hf_rate_limit_error(result.status_code, error_body)
-                                or is_hf_key_invalid(result.status_code, error_body)
-                            )
-                        except Exception:
-                            stream_hf_key_failure = False
-
-                    if (
-                        (
-                            result.status_code in RETRY_STATUSES
-                            or stream_hf_key_failure
-                        )
-                        and attempt < MAX_RETRIES
-                    ):
+                    # RETRY_STATUSES.
+                    if result.status_code in RETRY_STATUSES and attempt < MAX_RETRIES:
                         log.warning(
                             "req=%s key_idx=%d stream-status=%d attempt=%d — retrying with next key",
                             request_id,
@@ -455,19 +432,6 @@ class ProxyCore:
 
                     if status >= 400:
                         await self.pool.mark_error(key_idx, status)
-                        # Check for HF permanent retirement conditions
-                        if self.provider == "huggingface":
-                            resp_body = resp.content
-                            if is_hf_rate_limit_error(status, resp_body) or is_hf_key_invalid(status, resp_body):
-                                key_str = self.pool._keys[key_idx].key if key_idx < self.pool._n else ""
-                                if key_str:
-                                    added, removed = retire_and_remove_hf_key(key_str)
-                                    if added:
-                                        log.warning(
-                                            "req=%s HF key permanently retired (status=%d, key_idx=%d)",
-                                            request_id, status, key_idx,
-                                        )
-                                await self.pool.retire_key(key_idx)
                     else:
                         await self.pool.mark_success(key_idx, latency_ms)
 
@@ -621,38 +585,15 @@ class ProxyCore:
         status = upstream.status_code
         if status in RETRY_STATUSES or status >= 400:
             await self.pool.mark_error(key_idx, status)
-            # Check for HF permanent retirement conditions (non-streaming pre-response)
             pl.trace(request_id).upstream(key_idx, status)  # logging-only
             # Log the rejected status explicitly. Without this line a
-            # pre-stream upstream rejection (402, 400, 404, ...) produced
+            # pre-stream upstream rejection (400, 404, ...) produced
             # only the "▶ <rid> ... STREAM" start line and no status
             # line at all, so the failure was invisible in the logs.
             log.warning(
                 "req=%s key_idx=%d upstream rejected status=%d stream=1",
                 request_id, key_idx, status,
             )
-            if self.provider == "huggingface":
-                data = await upstream.aread()
-                if is_hf_rate_limit_error(status, data) or is_hf_key_invalid(status, data):
-                    key_str = self.pool._keys[key_idx].key if key_idx < self.pool._n else ""
-                    if key_str:
-                        added, removed = retire_and_remove_hf_key(key_str)
-                        if added:
-                            log.warning(
-                                "req=%s HF key permanently retired in stream (status=%d, key_idx=%d)",
-                                request_id, status, key_idx,
-                            )
-                    await self.pool.retire_key(key_idx)
-                await upstream.aclose()
-                await self.pool.release(key_idx)
-                self._free_sem.release()
-                return Response(
-                    content=data,
-                    status_code=upstream.status_code,
-                    media_type=upstream.headers.get(
-                        "content-type", "application/json"
-                    ),
-                )
             data = await upstream.aread()
             await upstream.aclose()
             await self.pool.release(key_idx)
@@ -787,15 +728,6 @@ class ProxyCore:
                                 await self.pool.mark_error(key_idx, err_status)
                             except Exception:
                                 pass
-                            # HF streaming rate-limit → permanent retirement
-                            if self.provider == "huggingface" and frame_error["kind"] in (
-                                "rate_limit", "concurrency"
-                            ):
-                                key_str = self.pool._keys[key_idx].key if key_idx < self.pool._n else ""
-                                if key_str:
-                                    retire_and_remove_hf_key(key_str)
-                                await self.pool.retire_key(key_idx)
-
                             # Do NOT yield the raw error frame to the client — it
                             # confuses Anthropic/OpenAI SDKs (they parse it as a
                             # valid chunk and then mismatch final usage). Just mark
@@ -1058,15 +990,6 @@ class ProxyCore:
                                 await self.pool.mark_error(key_idx, err_status)
                             except Exception:
                                 pass
-                            # HF streaming rate-limit → permanent retirement
-                            if self.provider == "huggingface" and frame_error["kind"] in (
-                                "rate_limit", "concurrency"
-                            ):
-                                key_str = self.pool._keys[key_idx].key if key_idx < self.pool._n else ""
-                                if key_str:
-                                    retire_and_remove_hf_key(key_str)
-                                await self.pool.retire_key(key_idx)
-
                             # Do NOT yield the error frame — terminate the stream
                             # cleanly so the next request rotates off this key via
                             # next_key()'s cooldown skip. Clients see a clean SSE

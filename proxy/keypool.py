@@ -12,7 +12,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from .config import (
     COOLDOWN_BASE_SECONDS,
     COOLDOWN_MAX_SECONDS,
-    HF_KEY_PREFIX,
     NV_KEY_PREFIX,
     MAX_CONSECUTIVE_ERRORS,
     MAX_CONCURRENT_PER_KEY,
@@ -57,9 +56,7 @@ class KeyPool:
     Modes:
       - "partial_sticky" (default): OpenRouter behaviour. Stays on a key while
         healthy and under the per-key concurrency cap, then rotates.
-      - "full_sticky": Hugging Face behaviour. Always returns the same key
-        until it is explicitly retired via retire_key(). Never rotates among
-        healthy keys. Retired keys are permanently excluded.
+      - "full_sticky": Always returns the same key until it is explicitly retired via retire_key(). Never rotates among healthy keys. Retired keys are permanently excluded.
     """
 
     def __init__(self, keys: List[str], mode: str = "partial_sticky") -> None:
@@ -192,7 +189,7 @@ class KeyPool:
         if self._n == 0:
             raise ValueError("No keys available in pool")
 
-        # --- Full-sticky mode (Hugging Face) ---
+        # --- Full-sticky mode ---
         # Always return the current sticky key unless it has been retired.
         # If the sticky key is retired or doesn't exist, pick the first
         # non-retired key and make it sticky.
@@ -357,7 +354,8 @@ class KeyPool:
 
         Marks the key as SUSPENDED with no cooldown recovery and adds it
         to the _retired set so next_key() will never select it again.
-        The caller is responsible for persisting the key to dead_hf_keys.txt.
+        The caller is responsible for persisting any retired key to a dead-key
+        file (provider-specific).
         """
         async with self._lock:
             if index < 0 or index >= self._n:
@@ -429,14 +427,14 @@ class KeyPool:
         return out
 
 
-_KEY_PREFIXES = ("sk-", "sk-ant-", "sk-proj-", "sk-openai-", HF_KEY_PREFIX, NV_KEY_PREFIX)
+_KEY_PREFIXES = ("sk-", "sk-ant-", "sk-proj-", "sk-openai-", NV_KEY_PREFIX)
 
 
 def load_keys(path: str) -> List[str]:
     """Load API keys from a text file.
 
     Recognizes lines starting with any known key prefix (sk-, sk-ant-, sk-proj-,
-    sk-openai-, hf_). Ignores blanks, comments, and non-key lines.
+    sk-openai-). Ignores blanks, comments, and non-key lines.
     Tolerates "KEY=sk-…" or plain key formats.
     """
     if not os.path.isfile(path):

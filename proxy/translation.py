@@ -1001,7 +1001,7 @@ def anthropic_messages_to_openai(
 
             # Images produced by tools are exposed as actual multimodal model
             # input. This is the provider-neutral OpenAI-compatible form used
-            # by OpenRouter, Hugging Face, NVIDIA NIM, Together, etc.
+            # by OpenRouter, NVIDIA NIM, Together, etc.
             if tool_image_parts:
                 tool_image_msg: Dict[str, Any] = {
                     "role": "user",

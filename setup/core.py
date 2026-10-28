@@ -29,12 +29,10 @@ SERVICE_NAME = "atlas-proxy.service"
 # data/<provider>_data/<keys> — kept in sync with proxy/config.py defaults
 _PROVIDER_KEY_FILES = {
     "openrouter":  "openrouter_data/openroute_keys.txt",
-    "huggingface": "huggingface_data/hf_keys.txt",
     "nvidia":      "nvda_data/keys.txt",
 }
 _DEAD_KEY_FILES = {
     "openrouter":  None,
-    "huggingface": "huggingface_data/dead_hf_keys.txt",
     "nvidia":      "nvda_data/dead_keys.txt",
 }
 
@@ -118,7 +116,6 @@ def key_file_for(repo: Path, provider: str) -> Path:
 def ensure_data_dirs(repo: Path) -> None:
     """Create all provider/data subdirectories used by the proxy."""
     (data_dir(repo) / "openrouter_data").mkdir(parents=True, exist_ok=True)
-    (data_dir(repo) / "huggingface_data").mkdir(parents=True, exist_ok=True)
     (data_dir(repo) / "nvda_data").mkdir(parents=True, exist_ok=True)
     (data_dir(repo) / "proxy_data").mkdir(parents=True, exist_ok=True)
     (repo / "proxy" / "logs").mkdir(parents=True, exist_ok=True)
@@ -258,21 +255,41 @@ def create_venv(repo: Path, quiet: bool = True) -> bool:
     return venv_python_exists(repo)
 
 
+def _tail_log(log: Path, n: int = 25) -> None:
+    """Print the last n lines of an installer log (best-effort)."""
+    try:
+        lines = log.read_text(errors="replace").splitlines()
+        for ln in lines[-n:]:
+            print("  " + ln, file=sys.stderr)
+    except Exception:
+        pass
+
+
 def install_requirements(repo: Path, quiet: bool = True) -> bool:
-    """pip install -r requirements.txt into the repo venv (idempotent)."""
+    """pip install -r requirements.txt into the repo venv (idempotent).
+
+    Output is streamed to <repo>/.installer.log instead of being captured in
+    memory: pip's verbose mode emits a large stream that can fill the
+    subprocess pipe buffer and deadlock against the timeout, falsely reporting
+    "failed to install requirements" for a perfectly healthy install.
+    """
     req = repo / "requirements.txt"
     if not req.exists():
         return False
+    log = repo / ".installer.log"
     base = ["-q"] if quiet else ["-v"]
     try:
-        r = subprocess.run(venv_pip(repo) + ["install", *base, "-r", str(req)],
-                           capture_output=True, text=True, timeout=300)
+        with open(log, "ab") as lf:
+            r = subprocess.run(venv_pip(repo) + ["install", *base, "--no-input",
+                                                 "-r", str(req)],
+                               stdout=lf, stderr=subprocess.STDOUT, timeout=600)
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        print(f"pip install failed: {e}", file=sys.stderr)
+        print(f"pip install failed: {e} (log: {log})", file=sys.stderr)
+        _tail_log(log)
         return False
     if r.returncode != 0:
-        print(r.stdout[-2000:], file=sys.stderr)
-        print(r.stderr[-2000:], file=sys.stderr)
+        print(f"pip install failed (rc={r.returncode}); see {log}", file=sys.stderr)
+        _tail_log(log)
         return False
     return True
 
@@ -314,8 +331,8 @@ def _deps_importable(repo: Path) -> bool:
 # never leaks keys or drags in compiled/interpreted cruft.
 _COPY_IGNORE = shutil.ignore_patterns(
     ".git", ".venv", "__pycache__", "*.pyc", "*.pyo", "*.egg-info",
-    "openroute_keys.txt", "hf_keys.txt", "nvapi_keys.txt", "keys.txt",
-    "dead_hf_keys.txt", "dead_keys.txt",
+    "openroute_keys.txt", "nvapi_keys.txt", "keys.txt",
+    "dead_keys.txt",
 )
 
 

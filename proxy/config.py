@@ -6,12 +6,11 @@ Logging is initialised in ``logger.py`` on import.  Use
 
 Quick reference (env vars):
     Default model (OR)          ATLAS_OPENROUTER_MODEL
-    Default model (HF)          ATLAS_HF_MODEL
     Default model (NV)          ATLAS_NV_MODEL
     Force default (global)      FORCE_DEFAULT_MODEL=0|1
-    Force default (per)         FORCE_DEFAULT_MODEL_OR / _HF
+    Force default (per)         FORCE_DEFAULT_MODEL_OR / _NV
     Listen host / port          LISTEN_HOST / LISTEN_PORT
-    Key file overrides          ATLAS_OPENROUTER_KEYS_FILE / ATLAS_HF_KEYS_FILE / ATLAS_NV_KEYS_FILE
+    Key file overrides          ATLAS_OPENROUTER_KEYS_FILE / ATLAS_NV_KEYS_FILE
     Runtime config file         data/proxy_data/runtime_provider.json
     System prompt override      data/proxy_data/prompt_override.txt
 """
@@ -58,7 +57,7 @@ def _env_int(key: str, default: int) -> int:
 _root_dir: Path = Path(__file__).resolve().parent.parent
 DATA_DIR: str = str(_root_dir / "data")
 
-# Runtime files written by the Atlas CLI (``atlas restart --huggingface``)
+# Runtime files written by the Atlas CLI (``atlas restart --nvidia``)
 RUNTIME_DIR: str = str(_root_dir / "data" / "proxy_data")
 RUNTIME_PROVIDER_FILE: str = str(_root_dir / "data" / "proxy_data" / "runtime_provider.json")
 
@@ -77,12 +76,6 @@ FALLBACK_KEY_FILE: str = _env(
     "FALLBACK_KEY_FILE",
     str(_root_dir / "data" / "openrouter_data" / "openroute_keys.txt"),
 )
-HF_KEY_FILE: str = _env("ATLAS_HF_KEYS_FILE", str(_root_dir / "data" / "huggingface_data" / "hf_keys.txt"))
-HF_DEAD_KEYS_FILE: str = _env(
-    "ATLAS_HF_DEAD_KEYS_FILE",
-    str(_root_dir / "data" / "huggingface_data" / "dead_hf_keys.txt"),
-)
-
 
 # ---------------------------------------------------------------------------
 # Provider registry
@@ -91,9 +84,7 @@ HF_DEAD_KEYS_FILE: str = _env(
 class ProviderConfig:
     """Immutable per-provider configuration.
 
-    Centralises base URL, key prefix, default model, and key file paths so
-    that provider-specific logic lives in one place instead of scattered
-    ``if PROVIDER == "huggingface"`` checks throughout the codebase.
+    Centralises base URL, key prefix, default model, and key file paths.
     """
     name: str
     base_url: str
@@ -122,9 +113,6 @@ OPENROUTER_BASE_URL: str = _env(
 OPENROUTER_CHAT: str = f"{OPENROUTER_BASE_URL}/chat/completions"
 OPENROUTER_MESSAGES: str = f"{OPENROUTER_BASE_URL}/messages"
 OPENROUTER_MODELS: str = f"{OPENROUTER_BASE_URL}/models"
-HF_BASE_URL: str = _env("ATLAS_HF_BASE_URL", "https://router.huggingface.co/v1")
-HF_KEY_PREFIX: str = "hf_"
-
 OPENROUTER_CONFIG = ProviderConfig(
     name="openrouter",
     base_url=OPENROUTER_BASE_URL,
@@ -133,16 +121,6 @@ OPENROUTER_CONFIG = ProviderConfig(
     key_file=KEY_FILE,
     dead_keys_file=FALLBACK_KEY_FILE,
     key_label="OpenRouter",
-)
-
-HF_CONFIG = ProviderConfig(
-    name="huggingface",
-    base_url=HF_BASE_URL,
-    key_prefix=HF_KEY_PREFIX,
-    default_model=_env("ATLAS_HF_MODEL", "deepseek-ai/DeepSeek-V4-Flash:deepinfra"),
-    key_file=HF_KEY_FILE,
-    dead_keys_file=HF_DEAD_KEYS_FILE,
-    key_label="HuggingFace",
 )
 
 # NVIDIA provider
@@ -170,7 +148,6 @@ NVIDIA_CONFIG = ProviderConfig(
 
 PROVIDERS: dict[str, ProviderConfig] = {
     "openrouter": OPENROUTER_CONFIG,
-    "huggingface": HF_CONFIG,
     "nvidia": NVIDIA_CONFIG,
 }
 
@@ -179,14 +156,12 @@ PROVIDERS: dict[str, ProviderConfig] = {
 # Provider selection — runtime config file written by the Atlas CLI
 # ---------------------------------------------------------------------------
 # atlas restart                     → OpenRouter (default)
-# atlas restart --huggingface       → Hugging Face
-# atlas restart --huggingface --M   → Hugging Face (M)
 # atlas restart --nvidia            → NVIDIA
 # atlas restart --nvidia <M>        → NVIDIA (model <M>)
 def _load_runtime_provider() -> str:
     """Read provider from runtime config file (written by the Atlas CLI).
 
-    Returns ``openrouter``, ``huggingface``, or ``nvidia``.
+    Returns ``openrouter`` or ``nvidia``.
     Falls back to ``ATLAS_PROVIDER`` env var, then ``openrouter``.
     """
     try:
@@ -196,8 +171,6 @@ def _load_runtime_provider() -> str:
         if p.is_file():
             data = _json.loads(p.read_text(encoding="utf-8"))
             provider = data.get("provider", "").lower()
-            if provider in ("huggingface", "hf"):
-                return "huggingface"
             if provider in ("nvidia", "nv"):
                 return "nvidia"
             if provider in ("openrouter", "or"):
@@ -224,7 +197,7 @@ def _load_runtime_model() -> Optional[str]:
 
 
 PROVIDER: str = _load_runtime_provider()
-"""Active provider: ``openrouter`` (default), ``huggingface``, or ``nvidia``.
+"""Active provider: ``openrouter`` (default) or ``nvidia``.
 
 Determined at import time from the runtime config file written by the
 Atlas CLI.  ``get_provider()`` / ``get_provider_config()`` are the
@@ -245,12 +218,6 @@ def _load_or_default_model() -> str:
 OPENROUTER_MODEL: str = _load_or_default_model()
 """Default OpenRouter model injected when the client omits ``model``."""
 
-HF_DEFAULT_MODEL: str = _env("ATLAS_HF_MODEL", "deepseek-ai/DeepSeek-V4-Flash:deepinfra")
-"""Fallback HF model (used only when runtime config has no model)."""
-
-HF_MODEL: str = _load_runtime_model() or HF_DEFAULT_MODEL
-"""Resolved HF model: runtime config → env → built-in default."""
-
 NV_MODEL: str = _load_runtime_model() or NV_DEFAULT_MODEL
 """Resolved NVIDIA model: runtime config → env → built-in default."""
 
@@ -262,14 +229,10 @@ FORCE_DEFAULT_MODEL: bool = _env_bool("FORCE_DEFAULT_MODEL", True)
 """Global override. When True (default), the client's ``model`` is replaced
 with the provider's configured default. When False, the client's model
 passes through — same as setting both ``FORCE_DEFAULT_MODEL_OR`` and
-``FORCE_DEFAULT_MODEL_HF`` to False."""
+``FORCE_DEFAULT_MODEL_NV`` to False."""
 
 FORCE_DEFAULT_MODEL_OR: bool = _env_bool("FORCE_DEFAULT_MODEL_OR", FORCE_DEFAULT_MODEL)
 """When True, override the client-sent model with ``OPENROUTER_MODEL``.
-Takes precedence over the global flag when this env var is explicitly set."""
-
-FORCE_DEFAULT_MODEL_HF: bool = _env_bool("FORCE_DEFAULT_MODEL_HF", FORCE_DEFAULT_MODEL)
-"""When True, override the client-sent model with ``HF_MODEL``.
 Takes precedence over the global flag when this env var is explicitly set."""
 
 FORCE_DEFAULT_MODEL_NV: bool = _env_bool("FORCE_DEFAULT_MODEL_NV", FORCE_DEFAULT_MODEL)
@@ -284,15 +247,13 @@ def get_force_default_model() -> bool:
     per-provider flag while preserving backwards compatibility for
     deployments that only set the global ``FORCE_DEFAULT_MODEL``.
     """
-    if PROVIDER == "huggingface":
-        return FORCE_DEFAULT_MODEL_HF
     if PROVIDER == "nvidia":
         return FORCE_DEFAULT_MODEL_NV
     return FORCE_DEFAULT_MODEL_OR
 
 
 def get_provider() -> str:
-    """Return the active provider: ``openrouter``, ``huggingface``, or ``nvidia``."""
+    """Return the active provider: ``openrouter`` or ``nvidia``."""
     return PROVIDER
 
 
@@ -306,7 +267,7 @@ def get_provider_config(name: Optional[str] = None) -> ProviderConfig:
 # Providers whose upstream API is OpenAI-format (need Anthropic↔OpenAI
 # response translation on the /messages endpoint). OpenRouter has a native
 # Anthropic-compatible /messages endpoint and does not need translation.
-_OPENAI_COMPATIBLE_PROVIDERS: frozenset[str] = frozenset({"huggingface", "nvidia"})
+_OPENAI_COMPATIBLE_PROVIDERS: frozenset[str] = frozenset({"nvidia"})
 
 
 def provider_is_openai_compatible(name: Optional[str] = None) -> bool:
@@ -322,8 +283,6 @@ def provider_is_openai_compatible(name: Optional[str] = None) -> bool:
 
 def get_chat_url() -> str:
     """Upstream chat/completions URL for the active provider."""
-    if PROVIDER == "huggingface":
-        return HF_CONFIG.chat_url
     if PROVIDER == "nvidia":
         return NVIDIA_CONFIG.chat_url
     return OPENROUTER_CHAT
@@ -332,18 +291,16 @@ def get_chat_url() -> str:
 def get_messages_url() -> str:
     """Upstream messages URL for the active provider.
 
-    Only OpenRouter exposes a native /messages endpoint; HF and NVIDIA are
-    OpenAI-compatible, so they reuse the chat/completions URL (see get_chat_url).
+    Only OpenRouter exposes a native /messages endpoint; NVIDIA is
+    OpenAI-compatible, so it reuses the chat/completions URL (see get_chat_url).
     """
-    if PROVIDER in ("huggingface", "nvidia"):
+    if PROVIDER == "nvidia":
         return get_chat_url()
     return OPENROUTER_MESSAGES
 
 
 def get_models_url() -> str:
     """Upstream models URL for the active provider."""
-    if PROVIDER == "huggingface":
-        return HF_CONFIG.models_url
     if PROVIDER == "nvidia":
         return NVIDIA_CONFIG.models_url
     return OPENROUTER_MODELS
@@ -351,8 +308,6 @@ def get_models_url() -> str:
 
 def get_default_model() -> str:
     """Default model for the active provider."""
-    if PROVIDER == "huggingface":
-        return HF_MODEL
     if PROVIDER == "nvidia":
         return NV_MODEL
     return OPENROUTER_MODEL
@@ -360,8 +315,6 @@ def get_default_model() -> str:
 
 def get_key_file() -> str:
     """Key file path for the active provider."""
-    if PROVIDER == "huggingface":
-        return HF_KEY_FILE
     if PROVIDER == "nvidia":
         return NV_KEY_FILE
     return KEY_FILE
@@ -374,8 +327,6 @@ def get_fallback_key_file() -> str:
 
 def get_key_prefix() -> str:
     """Key prefix for the active provider."""
-    if PROVIDER == "huggingface":
-        return HF_KEY_PREFIX
     if PROVIDER == "nvidia":
         return NV_KEY_PREFIX
     return "sk-"
@@ -573,206 +524,6 @@ LOG_REQUEST_ID: bool = _env_bool("LOG_REQUEST_ID", True)
 
 
 # ---------------------------------------------------------------------------
-# Key lifecycle management (Hugging Face)
-# ---------------------------------------------------------------------------
-def load_dead_hf_keys() -> set:
-    """Load retired HF keys from dead_hf_keys.txt.
-
-    Returns an empty set if the file doesn't exist. Never raises.
-    """
-    try:
-        p = Path(HF_DEAD_KEYS_FILE)
-        if not p.is_file():
-            return set()
-        keys: set[str] = set()
-        for line in p.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and line.startswith("hf_"):
-                keys.add(line)
-        return keys
-    except Exception as e:
-        log.warning("Failed to load dead HF keys from %s: %s", HF_DEAD_KEYS_FILE, e)
-        return set()
-
-
-def filter_hf_keys(keys: list[str], dead_keys: set[str]) -> list[str]:
-    """Filter out dead HF keys from the active key list.
-
-    Preserves order. If the current sticky key is still alive, it stays first.
-    Dead keys that appear in both files remain dead.
-    """
-    dead = dead_keys or set()
-    return [k for k in keys if k not in dead]
-
-
-def add_dead_hf_key(key: str) -> bool:
-    """Append a key to dead_hf_keys.txt.
-
-    Returns True if the key was added (not already present). Creates the
-    file lazily. Never raises.
-    """
-    try:
-        p = Path(HF_DEAD_KEYS_FILE)
-        existing = load_dead_hf_keys()
-        if key in existing:
-            return False
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(f"{key}\n")
-        log.info("HF key added to dead_hf_keys.txt (will be removed from active file on reload)")
-        return True
-    except Exception as e:
-        log.error("Failed to persist dead HF key: %s", e)
-        return False
-
-
-def remove_hf_key(key: str) -> bool:
-    """Remove a key from hf_keys.txt.
-
-    This is the counterpart of ``add_dead_hf_key()``: we add to
-    dead_keys.txt AND remove from hf_keys.txt so the active file stays clean.
-
-    Returns True if the key was present and removed. Never raises.
-    """
-    try:
-        p = Path(HF_KEY_FILE)
-        if not p.is_file():
-            return False
-        lines = p.read_text(encoding="utf-8").splitlines(keepends=True)
-        kept = [line for line in lines if line.strip() != key]
-        if len(kept) == len(lines):
-            return False  # key not in file
-        p.write_text("".join(kept), encoding="utf-8")
-        log.info("HF key removed from hf_keys.txt (%d lines → %d)", len(lines), len(kept))
-        return True
-    except Exception as e:
-        log.error("Failed to remove HF key from hf_keys.txt: %s", e)
-        return False
-
-
-def retire_and_remove_hf_key(key: str) -> tuple[bool, bool]:
-    """Convenience: add to dead_hf_keys.txt AND remove from hf_keys.txt.
-
-    Returns (added_to_dead, removed_from_active). Both True means a clean
-    two-sided retirement. Only the dead-file side True means the key was
-    already gone from the active file (idempotent). Never raises.
-    """
-    added = add_dead_hf_key(key)
-    removed = remove_hf_key(key)
-    if added or removed:
-        log.info("HF key retired: dead_file=%s active_file=%s", added, removed)
-    return (added, removed)
-
-
-def migrate_hf_active_keys() -> tuple[int, int]:
-    """Startup migration: remove keys from hf_keys.txt that are already
-    in dead_hf_keys.txt.
-
-    Cleans up the inconsistent state caused by the old retirement path that
-    only added to dead_keys.txt without removing from hf_keys.txt.
-
-    Returns (removed_count, kept_count). Never raises.
-    """
-    try:
-        active_p = Path(HF_KEY_FILE)
-        if not active_p.is_file():
-            return (0, 0)
-        dead_keys = load_dead_hf_keys()
-        if not dead_keys:
-            return (0, 0)
-        lines = active_p.read_text(encoding="utf-8").splitlines(keepends=True)
-        kept = [
-            line for line in lines
-            if not (line.strip().startswith("hf_") and line.strip() in dead_keys)
-        ]
-        removed = len(lines) - len(kept)
-        if removed > 0:
-            active_p.write_text("".join(kept), encoding="utf-8")
-            log.info(
-                "Startup migration: removed %d dead keys from hf_keys.txt "
-                "(kept %d usable keys)",
-                removed, len(kept),
-            )
-        return (removed, len(kept))
-    except Exception as e:
-        log.warning("Failed to migrate HF keys at startup: %s", e)
-        return (0, 0)
-
-
-# ---------------------------------------------------------------------------
-# Error classification
-# ---------------------------------------------------------------------------
-def is_hf_rate_limit_error(status: int, body: Optional[bytes] = None) -> bool:
-    """Determine whether an HF upstream response indicates a definitive
-    rate-limit / quota / credit exhaustion that warrants permanent key
-    retirement.
-
-    Triggers on:
-      - HTTP 429 (standard rate limit)
-      - HTTP 402 (Payment Required — HF quota/credit exhaustion)
-      - HF-specific quota/credit markers in the response body
-
-    Does NOT trigger on:
-      - 400 (malformed request)
-      - 401/403 (unless body specifically indicates invalid/exhausted credential)
-      - 404 (unsupported model)
-      - 500/502/503/504 (transient server errors)
-    """
-    if status in (429, 402):
-        return True
-    if body:
-        try:
-            text = body.decode("utf-8", errors="ignore").lower()
-            hf_quota_markers = (
-                "rate limit reached",
-                "quota exceeded",
-                "credit balance is insufficient",
-                "insufficient credits",
-                "credits exhausted",
-                "usage limit reached",
-                "rate_limited",
-            )
-            return any(m in text for m in hf_quota_markers)
-        except Exception:
-            pass
-    return False
-
-
-def is_hf_key_invalid(status: int, body: Optional[bytes] = None) -> bool:
-    """Determine whether an HF response indicates the key itself is
-    permanently invalid (not just rate-limited).
-
-    - 401 with 'invalid'/'unauthorized' in body
-    - 403 with 'invalid-api-key'/'revoked' markers
-
-    Does NOT trigger on generic 403 (which may mean access-denied for a
-    model, not an exhausted key).
-    """
-    if status == 401 and body:
-        try:
-            text = body.decode("utf-8", errors="ignore").lower()
-            if "invalid" in text or "unauthorized" in text:
-                return True
-        except Exception:
-            pass
-    if status == 403 and body:
-        try:
-            text = body.decode("utf-8", errors="ignore").lower()
-            if "invalid-api-key" in text or "revoked" in text:
-                return True
-        except Exception:
-            pass
-    return False
-
-
-# ---------------------------------------------------------------------------
-# Backwards-compat aliases — proxy.py historically imported HF-specific names
-# ---------------------------------------------------------------------------
-is_rate_limit_error = is_hf_rate_limit_error
-is_key_invalid = is_hf_key_invalid
-
-
-# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 __all__ = [
@@ -782,7 +533,6 @@ __all__ = [
     "DATA_DIR", "RUNTIME_DIR", "RUNTIME_PROVIDER_FILE",
     "SYSTEM_PROMPT_OVERRIDE_FILE",
     "KEY_FILE", "FALLBACK_KEY_FILE",
-    "HF_KEY_FILE", "HF_DEAD_KEYS_FILE",
     "NV_KEY_FILE", "NV_DEAD_KEYS_FILE",
     # Provider registry
     "ProviderConfig", "PROVIDERS",
@@ -790,10 +540,9 @@ __all__ = [
     "OPENROUTER_BASE_URL", "OPENROUTER_CHAT", "OPENROUTER_MESSAGES",
     "OPENROUTER_MODELS",
     "OPENROUTER_MODEL", "OPENROUTER_CONFIG",
-    "HF_BASE_URL", "HF_DEFAULT_MODEL", "HF_MODEL", "HF_KEY_PREFIX", "HF_CONFIG",
     "NV_BASE_URL", "NV_KEY_PREFIX", "NV_DEFAULT_MODEL", "NV_MODEL", "NVIDIA_CONFIG",
     # Model override
-    "FORCE_DEFAULT_MODEL", "FORCE_DEFAULT_MODEL_OR", "FORCE_DEFAULT_MODEL_HF",
+    "FORCE_DEFAULT_MODEL", "FORCE_DEFAULT_MODEL_OR",
     "FORCE_DEFAULT_MODEL_NV",
     "get_force_default_model",
     # URL / model / key resolution
@@ -826,10 +575,4 @@ __all__ = [
     "SAVE_PAYLOAD_FILES", "PAYLOAD_DIR",
     # Logging
     "LOG_LEVEL", "LOG_JSON", "LOG_REQUEST_ID", "get_logger", "log",
-    # Key lifecycle management
-    "load_dead_hf_keys", "filter_hf_keys", "add_dead_hf_key",
-    "remove_hf_key", "retire_and_remove_hf_key", "migrate_hf_active_keys",
-    # Error classification
-    "is_hf_rate_limit_error", "is_hf_key_invalid",
-    "is_rate_limit_error", "is_key_invalid",
 ]

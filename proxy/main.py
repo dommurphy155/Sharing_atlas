@@ -26,7 +26,6 @@ from .config import (
     LISTEN_PORT,
     LOG_LEVEL,
     PROVIDER,
-    HF_KEY_FILE,
     NV_KEY_FILE,
     SYSTEM_PROMPT_OVERRIDE_FILE,
     get_default_model,
@@ -34,7 +33,6 @@ from .config import (
     get_key_file,
     get_key_prefix,
     reload_system_prompt_override,
-    migrate_hf_active_keys,
     log,
 )
 from .keypool import KeyPool, load_keys
@@ -58,14 +56,9 @@ except ImportError:
 def _load_provider_keys() -> list[str]:
     """Load keys from the provider-appropriate file.
 
-    For HuggingFace, loads hf_keys.txt directly. Dead keys are never in
-    the active file because retire_and_remove_hf_key() removes them on
-    retirement, and migrate_hf_active_keys() cleans up any orphans at
-    startup. For OpenRouter, returns keys from KEY_FILE unchanged
-    (preserving existing behaviour).
+    Returns keys from the active provider's key file. OpenRouter uses
+    KEY_FILE, NVIDIA uses NV_KEY_FILE.
     """
-    if PROVIDER == "huggingface":
-        return load_keys(HF_KEY_FILE)
     if PROVIDER == "nvidia":
         return load_keys(NV_KEY_FILE)
     return load_keys(KEY_FILE)
@@ -76,10 +69,10 @@ _load_active_keys = _load_provider_keys
 
 
 def _reload_keys_for_provider() -> list[str]:
-    """Reload keys, respecting dead-key exclusion for HF and the
-    OpenRouter fallback file when the primary is empty."""
-    if PROVIDER == "huggingface":
-        return _load_provider_keys()
+    """Reload keys for the active provider.
+
+    OpenRouter falls back to FALLBACK_KEY_FILE when the primary is empty.
+    """
     if PROVIDER == "nvidia":
         return load_keys(NV_KEY_FILE)
     # OpenRouter: use fallback if primary is empty (existing behaviour)
@@ -97,11 +90,6 @@ def _reload_keys_for_provider() -> list[str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # --- Startup migration: clean dead keys from HF active file ---
-    if PROVIDER == "huggingface":
-        removed, kept = migrate_hf_active_keys()
-        log.info("HF key migration: removed %d dead keys, kept %d active", removed, kept)
-
     # --- Shuffle key file in-place before pool construction (startup only) ---
     # Randomises key order so fresh boots don't hammer the same keys in
     # sequence after repeated local testing/restarts.
@@ -132,7 +120,7 @@ async def lifespan(app: FastAPI):
         )
         keys = []  # Start with empty pool, will be populated
 
-    pool_mode = "full_sticky" if PROVIDER == "huggingface" else "partial_sticky"
+    pool_mode = "partial_sticky"
     log.info("Loaded %d %s keys (mode=%s)", len(keys), PROVIDER, pool_mode)
     pool = KeyPool(keys, mode=pool_mode) if keys else KeyPool([], mode=pool_mode)
 
@@ -175,8 +163,7 @@ async def lifespan(app: FastAPI):
 async def _reload_keys_periodically(pool: KeyPool) -> None:
     """Periodically reload keys from file and update pool.
 
-    For OpenRouter, uses KEY_FILE (existing behaviour unchanged).
-    For HuggingFace, uses HF_KEY_FILE while respecting dead_hf_keys.txt.
+    Uses the active provider's key file (see _load_provider_keys).
     Also hot-reloads system prompt override (shared).
 
     Change detection is content-based, not mtime-based: we compare the

@@ -88,7 +88,6 @@ except Exception as e:
 # key files
 import itertools
 files = [("openrouter", repo/"data/openrouter_data/openroute_keys.txt"),
-         ("huggingface", repo/"data/huggingface_data/hf_keys.txt"),
          ("nvidia", repo/"data/nvda_data/keys.txt")]
 for prov, f in files:
     n = sum(1 for ln in f.read_text().splitlines()) if f.exists() else 0

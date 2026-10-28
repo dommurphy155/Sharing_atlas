@@ -66,8 +66,7 @@ def _repo_root_from(args_repo: str | None) -> Path:
 def _intro() -> None:
     title = "[bold underline]Atlas Proxy[/bold underline]"
     body = (
-        "[cyan]Atlas[/cyan] is a single-user translation proxy for OpenRouter / "
-        "Hugging Face / NVIDIA.\n"
+        "[cyan]Atlas[/cyan] is a single-user translation proxy for OpenRouter / NVIDIA.\n"
         "It owns your upstream API keys, load-balances them, and exposes an "
         "Anthropic- and OpenAI-compatible API on [green]http://127.0.0.1:"
         + str(core.proxy_port(core.repo_root()))
@@ -402,7 +401,6 @@ def _finalize_install(h: Harness, proc, dry_run: bool) -> tuple[bool, str]:
 # ===========================================================================
 PROVIDERS = [
     ("openrouter",  "OpenRouter",   "Recommended"),
-    ("huggingface", "Hugging Face", "Frontier models / limited free usage"),
     ("nvidia",      "NVIDIA",       "Reliable, but slower"),
 ]
 
@@ -810,7 +808,7 @@ def _arg_parser() -> "argparse.ArgumentParser":
                     help="proxy-only install (skip harness pick/install/launch)")
     ap.add_argument("--harness", choices=["claude", "codex", "hermes"], default=None,
                     help="install/verify a specific harness (headless-safe)")
-    ap.add_argument("--provider", choices=["openrouter", "huggingface", "nvidia"],
+    ap.add_argument("--provider", choices=["openrouter", "nvidia"],
                     default=None, help="set the upstream provider without prompting")
     ap.add_argument("--skip-keys", action="store_true",
                     help="skip interactive key import (add keys later via atlas import-key)")
