@@ -24,7 +24,7 @@ if (-not $py) {
     Write-Error "python/python3 not found — install Python 3.10+ and re-run."
     exit 1
 }
-$ver = & $py.Python -c "import sys; print('%d.%d' % sys.version_info[:2])"
+$ver = & $py.Python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
 if ($ver -as [version] -lt [version]"3.10") {
     Write-Error "Python $ver too old — need 3.10+"
     exit 7
