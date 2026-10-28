@@ -882,7 +882,7 @@ class LaunchdRuntime:
 
 
 # ---- Windows Task Scheduler -------------------------------------------------
-# A scheduled task (trigger: at log on, with restart-on-failure) is the native
+# Windows uses a detached process with a repo-scoped PID file.
 # Windows supervisor that starts at login and survives reboot. The task action
 # runs the venv python on `proxy.main`; no admin required (per-user task).
 class WindowsRuntime:
@@ -896,8 +896,8 @@ class WindowsRuntime:
         self.venv_py = venv_py
         self.log_file = log_file
         self.info = RuntimeInfo(
-            mode="scheduled-task", label="scheduled task (at log on)",
-            session=self.TASK_NAME, pid=None,
+            mode="scheduled-task", label="detached proxy process",
+            session="direct-process", pid=None,
         )
 
     def _action(self) -> str:
@@ -907,88 +907,118 @@ class WindowsRuntime:
     def install(self) -> tuple[bool, str]:
         # Remove a pre-existing task with the same name (idempotent), then
         # register a fresh one.
-        self._schtasks(["/End", f"/TN", self.TASK_NAME], check=False)
-        self._schtasks(["/Delete", "/F", f"/TN", self.TASK_NAME], check=False)
-        args = f'-NoProfile -WindowStyle Hidden "{self.venv_py}" -m proxy.main'
-        script = (
-            f'$a = New-ScheduledTaskAction -Execute "python" -Argument "{args}"\n'
-            f'$t = New-ScheduledTaskTrigger -AtLogOn\n'
-            f'$s = New-ScheduledTaskSettingsSet -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1) '
-            f'-AllowStartIfOnline -DontStopIfGoingOnBatteries\n'
-            f'$p = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited\n'
-            f'Register-ScheduledTask -TaskName "Atlas Proxy" -Action $a -Trigger $t -Settings $s -Principal $p'
-        )
-        r = run_powershell_local(script, timeout=30.0)
-        if not r or r.returncode != 0:
-            return False, (r.stderr.strip() if r else "scheduled task registration failed")
-        # Start it now (the at-logon trigger only fires on next logon).
-        self.start()
-        return True, f"scheduled task registered ({self.TASK_NAME})"
+        return self.start()
 
     def _schtasks(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess | None:
         return _run_quiet(["schtasks", *args], timeout=10.0)
 
     def start(self) -> tuple[bool, str]:
-        r = self._schtasks(["/Run", f"/TN", self.TASK_NAME])
-        if r is None or r.returncode != 0:
-            # If the task isn't registered yet, fall back to launching the
-            # process directly so the proxy is up for verification this session.
-            try:
-                self.log_file.parent.mkdir(parents=True, exist_ok=True)
-                with self.log_file.open("ab") as fh:
-                    subprocess.Popen(
-                        [str(self.venv_py), "-m", "proxy.main"],
-                        stdout=fh, stderr=subprocess.STDOUT,
-                        stdin=subprocess.DEVNULL, cwd=str(self.repo_root),
-                        creationflags=subprocess.CREATE_NO_WINDOW,
-                    )
-            except OSError as e:
-                return False, f"could not start proxy process: {e}"
-        return True, f"started ({self.TASK_NAME})"
+        import subprocess
+        from pathlib import Path
+
+        pidfile = Path(self.repo_root) / "data" / "run.pid"
+        if self.status()[0]:
+            return True, f"already running (pid={pidfile.read_text().strip()})"
+
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        self.log_file.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            with self.log_file.open("ab") as log:
+                flags = (
+                    getattr(subprocess, "DETACHED_PROCESS", 0)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                )
+                proc = subprocess.Popen(
+                    [str(self.venv_py), "-m", "proxy.main"],
+                    cwd=str(self.repo_root),
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    creationflags=flags,
+                    close_fds=True,
+                )
+            pidfile.write_text(str(proc.pid), encoding="utf-8")
+            return True, f"started (pid={proc.pid}, log={self.log_file})"
+        except Exception as exc:
+            return False, f"could not start proxy: {type(exc).__name__}: {exc}"
 
     def stop(self) -> tuple[bool, str]:
-        r = self._schtasks(["/End", f"/TN", self.TASK_NAME])
-        # Also kill any lingering proxy.main process on this machine.
+        import subprocess
+        from pathlib import Path
+
+        pidfile = Path(self.repo_root) / "data" / "run.pid"
         try:
-            subprocess.run(["taskkill", "/F", "/IM", "python.exe", "/T"],
-                           capture_output=True, text=True, timeout=10)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-        if r is None:
-            return False, "schtasks unavailable"
-        return True, f"stopped ({self.TASK_NAME})"
+            pid = int(pidfile.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            pidfile.unlink(missing_ok=True)
+            return True, "not running"
+
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                # Do not remove the PID file if stopping failed.
+                return False, (
+                    result.stderr.strip() or result.stdout.strip()
+                    or f"could not stop PID {pid}"
+                )
+            pidfile.unlink(missing_ok=True)
+            return True, f"stopped PID {pid}"
+        except Exception as exc:
+            return False, f"could not stop PID {pid}: {exc}"
 
     def status(self) -> tuple[bool, str]:
-        r = self._schtasks(["/Query", "/TN", self.TASK_NAME, "/FO", "LIST"])
-        if r is None:
-            return False, "schtasks unavailable"
-        if r.returncode != 0:
-            return False, "task not registered"
-        running = "Running" in (r.stdout or "")
-        return running, ("running (scheduled task)" if running else "registered (at log on)")
+        import os
+        from pathlib import Path
+
+        pidfile = Path(self.repo_root) / "data" / "run.pid"
+        try:
+            pid = int(pidfile.read_text(encoding="utf-8").strip())
+            os.kill(pid, 0)
+            return True, f"running (pid={pid})"
+        except (OSError, ValueError):
+            pidfile.unlink(missing_ok=True)
+            return False, "not running"
 
     def logs(self, follow: bool = True) -> int:
+        import time
+
         if not self.log_file.exists():
             print(f"No log file yet: {self.log_file}", file=sys.stderr)
             return 1
+
         try:
-            return subprocess.call(["more", str(self.log_file)])
-        except FileNotFoundError:
+            with self.log_file.open("r", encoding="utf-8", errors="replace") as log:
+                lines = log.readlines()
+                print("".join(lines[-40:]), end="")
+                if follow:
+                    while True:
+                        line = log.readline()
+                        if line:
+                            print(line, end="", flush=True)
+                        else:
+                            time.sleep(0.25)
+        except KeyboardInterrupt:
+            return 0
+        except OSError as exc:
+            print(f"Could not read log: {exc}", file=sys.stderr)
             return 1
+        return 0
 
     def cleanup(self) -> None:
-        """Best-effort: stop + delete the task. Never raises."""
+        from pathlib import Path
+
         try:
-            self._schtasks(["/End", f"/TN", self.TASK_NAME])
+            self.stop()
         except Exception:
             pass
-        try:
-            self._schtasks(["/Delete", "/F", f"/TN", self.TASK_NAME])
-        except Exception:
-            pass
+        (Path(self.repo_root) / "data" / "run.pid").unlink(missing_ok=True)
 
     def env_summary(self) -> dict:
-        return {"mode": "scheduled-task", "task": self.TASK_NAME}
+        return {"mode": "scheduled-task", "runtime": "detached-process"}
 
 
 def run_powershell_local(script: str, timeout: float = 30.0) -> subprocess.CompletedProcess | None:
@@ -1129,6 +1159,11 @@ def install_runtime(repo_root: Path, venv_py: Path,
         )
         return mode, True, health_msg or message
 
+    # Windows has one direct-process runtime; do not report success if it failed.
+    if env.os == "windows":
+        _emit(f"! Windows proxy startup failed: {last_message}")
+        return "scheduled-task", False, last_message
+
     # Everything failed — record manual so the installer still completes.
     _emit("! No automatic runtime manager available")
     manual_rt = build_runtime("manual", env, repo_root, venv_py, service_name)
@@ -1221,7 +1256,7 @@ def _candidate_modes(env: RuntimeEnv) -> list[RuntimeMode]:
 
     Linux:  systemd-system -> systemd-user -> tmux -> nohup
     macOS:  launchd -> tmux -> nohup
-    Windows: scheduled-task -> manual
+    Windows: detached process -> manual
     Other:  tmux -> nohup
     Manual is always the final fallback (handled by the caller).
     """
@@ -1246,10 +1281,7 @@ def _candidate_modes(env: RuntimeEnv) -> list[RuntimeMode]:
             candidates.append("nohup")
         return candidates
     if env.os == "windows":
-        candidates = []
-        if env.scheduled_task_usable:
-            candidates.append("scheduled-task")
-        return candidates
+        return ["scheduled-task"]
     candidates = []
     if env.tmux_usable:
         candidates.append("tmux")
@@ -1300,6 +1332,12 @@ def get_runtime(repo_root: Path, venv_py: Path, service_name: str) -> Runtime:
     persisted = load_runtime_choice(repo_root)
     env = detect_env()
 
+    # Windows uses the repo-scoped direct-process runtime.
+    if env.os == "windows":
+        return build_runtime(
+            "scheduled-task", env, repo_root, venv_py, service_name
+        )
+
     if persisted:
         mode = persisted.get("mode", "nohup")
         if _mode_usable(mode, env):
@@ -1327,7 +1365,7 @@ def _mode_usable(mode: RuntimeMode, env: RuntimeEnv) -> bool:
     if mode == "launchd":
         return env.launchd_usable
     if mode == "scheduled-task":
-        return env.scheduled_task_usable
+        return env.os == "windows"
     if mode == "manual":
         return True
     return False

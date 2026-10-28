@@ -48,7 +48,7 @@ def _find_repo_root() -> Path:
 REPO_ROOT = _find_repo_root()
 PROXY_PKG = REPO_ROOT / "proxy"
 DATA_DIR = REPO_ROOT / "data"
-VENV_PY = REPO_ROOT / ".venv" / "bin" / "python"
+VENV_PY = REPO_ROOT / ".venv" / ("Scripts" / "python.exe" if os.name == "nt" else "bin" / "python")
 PROXY_LOG_FILE = PROXY_PKG / "logs" / "atlas-proxy.log"
 # Service name matches the systemd unit the installer writes. Override with
 # ATLAS_SERVICE_NAME env var when this repo coexists with another atlas
@@ -309,7 +309,7 @@ def cmd_status(args) -> int:
     table.add_row("Repo", str(REPO_ROOT))
     table.add_row("Listen", f"{host}:{port}")
     table.add_row("URL", url)
-    table.add_row("Platform", f"{platform.system().lower()} (root={'yes' if os.geteuid() == 0 else 'no'})")
+    table.add_row("Platform", f"{platform.system().lower()} (root={'yes' if getattr(os, "geteuid", lambda: 0)() == 0 else 'no'})")
     table.add_row("Mode", cyan(rt.info.label))
     if rt.info.session and rt.info.session != rt.info.label:
         table.add_row("Session", rt.info.session)

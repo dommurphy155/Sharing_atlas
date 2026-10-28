@@ -113,54 +113,47 @@ def make_posix_shim(repo: Path, bin_dir: Path) -> tuple[bool, str]:
     return True, f"Installed CLI wrapper: {shim}.{hint}"
 
 
-def make_windows_shim(repo: Path, bin_dir: Path) -> tuple[bool, str]:
-    """Install the Windows CLI wrapper."""
+def make_windows_shim(repo, bin_dir):
+    import os
+    import winreg
+
     python = Path(core.venv_python(repo))
     target = repo / "atlas" / "bin" / "atlas"
-
-    if not python.is_file():
-        return False, f"Virtual-environment Python not found: {python}"
-
-    if not target.is_file():
-        return False, f"Atlas CLI entry point not found: {target}"
-
-    bin_dir.mkdir(parents=True, exist_ok=True)
+    bin_dir = Path(bin_dir).expanduser()
     shim = bin_dir / "atlas.cmd"
 
-    # Do not overwrite unrelated commands. Only skip when the existing
-    # command resolves to this exact wrapper.
-    existing = _atlas_on_path()
+    if not python.is_file():
+        return False, f"Virtualenv Python not found: {python}"
+    if not target.is_file():
+        return False, f"Atlas CLI not found: {target}"
 
-    if existing:
-        try:
-            if Path(existing).resolve() == shim.resolve():
-                return True, f"Atlas CLI wrapper already installed: {shim}"
-        except (OSError, ValueError):
-            pass
-
+    bin_dir.mkdir(parents=True, exist_ok=True)
     shim.write_text(
-        "@echo off\r\n"
-        f"rem {_shim_header()}\r\n"
-        f'"{python}" "{target}" %*\r\n'
-        "exit /b %ERRORLEVEL%\r\n",
+        '@echo off\\r\\n'
+        f'"{python}" "{target}" %*\\r\\n'
+        'exit /b %ERRORLEVEL%\\r\\n',
         encoding="utf-8",
     )
 
-    path_entries = [
-        os.path.normcase(os.path.normpath(entry.strip('"')))
-        for entry in os.environ.get("PATH", "").split(os.pathsep)
-        if entry
-    ]
-    normalized_bin = os.path.normcase(os.path.normpath(str(bin_dir)))
-    on_path = normalized_bin in path_entries
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, "Environment", 0,
+            winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE,
+        ) as key:
+            try:
+                user_path, value_type = winreg.QueryValueEx(key, "Path")
+            except FileNotFoundError:
+                user_path, value_type = "", winreg.REG_EXPAND_SZ
 
-    hint = ""
-    if not on_path:
-        hint = (
-            f" Add {bin_dir} to your user PATH, then reopen the terminal."
-        )
+            entries = [x.strip().strip('"') for x in user_path.split(";") if x.strip()]
+            norm = os.path.normcase(os.path.normpath(str(bin_dir)))
+            if not any(os.path.normcase(os.path.normpath(x)) == norm for x in entries):
+                entries.append(str(bin_dir))
+                winreg.SetValueEx(key, "Path", 0, value_type, ";".join(entries))
 
-    return True, f"Installed CLI wrapper: {shim}.{hint}"
+        return True, f"Installed {shim}; user PATH updated. Open a new terminal."
+    except Exception as exc:
+        return True, f"Installed {shim}, but could not update user PATH: {exc}"
 
 
 def _chmodx(path: Path) -> None:

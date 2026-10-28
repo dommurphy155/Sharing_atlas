@@ -45,8 +45,36 @@ def _intro() -> None:
     CONSOLE.print(Panel(Text.from_markup(body), title=title, border_style="cyan"))
 
 
+def _clear_windows_key_files(repo):
+    """Clear configured OpenRouter key files before collecting fresh keys."""
+    import sys
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+
+    paths = [core.key_file(repo)]
+    try:
+        from proxy import config
+        paths.extend((Path(config.KEY_FILE), Path(config.FALLBACK_KEY_FILE)))
+    except Exception as exc:
+        console.print(f"[yellow]Could not load configured key paths: {exc}[/yellow]")
+
+    unique = {}
+    for path in paths:
+        path = Path(path).expanduser()
+        if not path.is_absolute():
+            path = repo / path
+        path = path.resolve()
+        unique[str(path).casefold()] = path
+
+    for path in unique.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    console.print(f"[dim]Cleared {len(unique)} configured key file(s).[/dim]")
+
 def _collect_keys(repo: Path) -> list[str]:
     """Prompt the user for OpenRouter API keys. Returns the full key list."""
+    if core.is_windows():
+        _clear_windows_key_files(repo)
     target = core.key_file(repo)
     existing = core.read_keys(target)
 
@@ -194,7 +222,7 @@ def _show_exit(repo: Path, started_ok: bool) -> None:
         CONSOLE.print(f"  PID file: {core.pid_file(repo)}")
         CONSOLE.print("\n  To stop the proxy:")
         if core.is_windows():
-            CONSOLE.print("    taskkill /F /IM python.exe /T")
+            CONSOLE.print("    atlas stop")
         else:
             CONSOLE.print(f"    kill $(cat {core.pid_file(repo)})")
         CONSOLE.print("\n  To manage it later, run:  atlas status | atlas stop | atlas start")
@@ -241,7 +269,7 @@ def run_wizard(repo: Path, venv_py: Path) -> int:
     # ---- Step 5: Optional CLI shim ----
     CONSOLE.print("\n[cyan]Optional: install `atlas` CLI?[/cyan]")
     CONSOLE.print("  This lets you run `atlas status`, `atlas stop`, `atlas start` later.")
-    if Confirm.ask("Install CLI shim?", default=True):
+    if core.is_windows() or Confirm.ask("Install CLI shim?", default=True):
         shim_ok, shim_msg = _install_cli_shim(repo, osmod)
         shim_style = "[green]✓[/green]" if shim_ok else "[red]✘[/red]"
         CONSOLE.print(f"  {shim_style} {shim_msg}")
