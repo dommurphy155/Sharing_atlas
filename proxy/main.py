@@ -39,6 +39,15 @@ from .keypool import KeyPool, load_keys
 from .proxy import ProxyCore
 from . import prettylog as _prettylog
 
+# Cross-platform console encoding: configure streams before logging handlers attach.
+for _console_stream in (sys.stdout, sys.stderr):
+    _reconfigure = getattr(_console_stream, "reconfigure", None)
+    if callable(_reconfigure):
+        try:
+            _reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (OSError, ValueError):
+            pass
+
 # Logging-only: swap the pretty formatter onto the existing root handler(s),
 # then mirror every line into proxy/logs/atlas-proxy.log (plain text, rotated).
 _prettylog.attach()
