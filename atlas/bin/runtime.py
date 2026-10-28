@@ -971,17 +971,48 @@ class WindowsRuntime:
             return False, f"could not stop PID {pid}: {exc}"
 
     def status(self) -> tuple[bool, str]:
-        import os
+        import csv
+        import io
         from pathlib import Path
 
         pidfile = Path(self.repo_root) / "data" / "run.pid"
         try:
             pid = int(pidfile.read_text(encoding="utf-8").strip())
-            os.kill(pid, 0)
-            return True, f"running (pid={pid})"
         except (OSError, ValueError):
             pidfile.unlink(missing_ok=True)
             return False, "not running"
+
+        # Do not use os.kill(pid, 0) on Windows: Windows signal handling
+        # differs from POSIX and is not a safe process-existence check.
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, f"could not verify PID {pid}: {exc}"
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            return False, detail or f"could not verify PID {pid}"
+
+        try:
+            rows = csv.reader(io.StringIO(result.stdout))
+            running = any(
+                len(row) > 1 and row[1].strip() == str(pid)
+                for row in rows
+            )
+        except (csv.Error, OSError) as exc:
+            return False, f"could not parse tasklist output: {exc}"
+
+        if running:
+            return True, f"running (pid={pid})"
+
+        pidfile.unlink(missing_ok=True)
+        return False, "not running"
 
     def logs(self, follow: bool = True) -> int:
         import time
