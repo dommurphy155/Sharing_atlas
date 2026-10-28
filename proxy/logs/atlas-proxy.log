@@ -1,0 +1,8 @@
+08:33:39  INFO    Loaded 1170 openrouter keys (mode=partial_sticky)
+08:33:39  INFO    Proxy listening on http://0.0.0.0:8000  (keys=1170, healthy=1170, provider=openrouter, default_model=nvidia/nemotron-3.5-super-vl:free, force=True)
+08:33:42  INFO    TLS pre-warm complete (status=200)
+08:33:45  INFO    Shutdown complete
+08:41:21  INFO    Loaded 1170 openrouter keys (mode=partial_sticky)
+08:41:21  INFO    Proxy listening on http://0.0.0.0:8000  (keys=1170, healthy=1170, provider=openrouter, default_model=nvidia/nemotron-3.5-super-vl:free, force=True)
+08:41:24  INFO    TLS pre-warm complete (status=200)
+08:41:34  INFO    Shutdown complete

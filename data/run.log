@@ -1,0 +1,13 @@
+08:41:21 [INFO] Loaded system prompt override (18661 chars)
+INFO:     Started server process [1237081]
+INFO:     Waiting for application startup.
+[2m08:41:21[0m  INFO    Loaded 1170 openrouter keys (mode=partial_sticky)
+[2m08:41:21[0m  INFO    Proxy listening on http://0.0.0.0:8000  (keys=1170, healthy=1170, provider=openrouter, default_model=nvidia/nemotron-3.5-super-vl:free, force=True)
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+[2m08:41:24[0m  INFO    TLS pre-warm complete (status=200)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+[2m08:41:34[0m  INFO    Shutdown complete
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1237081]

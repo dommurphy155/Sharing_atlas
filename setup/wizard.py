@@ -1,16 +1,20 @@
 """Simplified Atlas installer wizard.
 
 Flow (one command):
-    1. Intro     — one-line explanation
-    2. Collect keys — prompt for OpenRouter API key(s) (multiple supported)
-    3. Start proxy — launch proxy.main detached, verify /health + keys loaded
-    4. Exit      — report success, tell user how to stop
+    1. Bootstrap   — detect OS, check Python >= 3.10, create venv, install deps
+    2. Collect keys — prompt for OpenRouter API key(s), save to key file
+    3. Start proxy — launch with a supervisor so it stays alive after exit
+    4. Verify      — confirm /health is up and keys are loaded
+    5. (Optional)  — install the `atlas` CLI shim for later stop/status
+    6. Exit        — report success, tell user how to stop
 
-No harness configuration. No auto-start registration. No CLI shims.
+No harness configuration. No provider choice (OpenRouter only). No extra steps.
+The proxy keeps running after setup finishes.
 Cross-platform: Linux, macOS, Windows.
 """
 from __future__ import annotations
 
+import importlib
 import sys
 import time
 from pathlib import Path
@@ -30,12 +34,13 @@ def _intro() -> None:
     title = "[bold underline]Atlas Proxy Setup[/bold underline]"
     body = (
         "This gets the Atlas translation proxy running with your OpenRouter "
-        "API keys in four steps:\n\n"
+        "API keys. Four steps:\n\n"
         "  1. Bootstrap — check Python, create venv, install dependencies\n"
         "  2. Collect keys — enter your OpenRouter API key(s)\n"
-        "  3. Start proxy — launch and verify it is running\n"
-        "  4. Exit — you are done\n\n"
-        "No harness configuration. No auto-start. No extra steps."
+        "  3. Start proxy — launch with a supervisor so it stays alive\n"
+        "  4. Verify — confirm it's healthy, then exit\n\n"
+        "No harness configuration. No extra steps. The proxy keeps running "
+        "after setup finishes."
     )
     CONSOLE.print(Panel(Text.from_markup(body), title=title, border_style="cyan"))
 
@@ -83,31 +88,67 @@ def _save_keys(repo: Path, keys: list[str]) -> tuple[int, int]:
     return added, total
 
 
-def _start_and_verify(repo: Path, venv_py: Path, expected_keys: int
-                      ) -> tuple[bool, str]:
-    """Start the proxy detached and verify it is healthy with keys loaded."""
-    ok, msg, _pid = core.start_proxy_detached(repo, venv_py)
-    if not ok:
-        return False, msg
-    CONSOLE.print(f"  [green]✓[/green] {msg}")
+def _os_module():
+    """Lazily import the OS-specific setup module (linux_setup / mac_setup / windows_setup)."""
+    name = core.detect_os()
+    return importlib.import_module(f".{name}_setup", package="setup")
 
-    CONSOLE.print("  Waiting for proxy to become healthy...", end="")
+
+def _start_with_supervisor(repo: Path, osmod) -> tuple[bool, str]:
+    """Start the proxy via the OS supervisor so it stays alive after exit.
+
+    Delegates to setup._supervisor.start_proxy -> runtime.install_runtime,
+    which picks the best available supervisor (systemd / launchd /
+    scheduled-task / tmux / nohup), starts the proxy, health-checks it, and
+    persists the choice for later `atlas start/stop/status`.
+    """
+    try:
+        ok, msg = osmod.start_proxy(repo)
+    except Exception as e:  # never crash the installer on a supervisor error
+        return False, f"supervisor start failed: {type(e).__name__}: {e}"
+    return ok, msg
+
+
+def _install_cli_shim(repo: Path, osmod) -> tuple[bool, str]:
+    """Install the `atlas` CLI wrapper on PATH so the user can manage the proxy."""
+    try:
+        return osmod.install_cli_shim(repo)
+    except Exception as e:
+        return False, f"CLI shim install failed: {type(e).__name__}: {e}"
+
+
+def _verify(repo: Path, expected_keys: int) -> tuple[bool, str]:
+    """Verify the proxy is healthy and keys are loaded."""
     healthy, hmsg = core.health_check(repo, timeout=15.0)
     if not healthy:
-        CONSOLE.print(" [red]✘[/red]")
-        return False, f"proxy did not become healthy: {hmsg}"
-    CONSOLE.print(f" [green]✓[/green] {hmsg}")
+        return False, f"proxy not healthy: {hmsg}"
 
-    # Confirm keys are present on disk
     actual_keys = core.read_keys(core.key_file(repo))
     if not actual_keys:
         return False, "no OpenRouter keys found in key file"
     if len(actual_keys) < expected_keys:
-        return False, (f"expected {expected_keys} key(s), "
-                       f"found {len(actual_keys)}")
+        return False, f"expected {expected_keys} key(s), found {len(actual_keys)}"
 
-    return True, (f"proxy running with {len(actual_keys)} "
-                  f"OpenRouter key(s)")
+    port = core.proxy_port(repo)
+    return True, f"healthy on 127.0.0.1:{port} with {len(actual_keys)} key(s)"
+
+
+def _start_and_verify(repo: Path, venv_py: Path, expected_keys: int
+                      ) -> tuple[bool, str]:
+    """Start the proxy with a supervisor and verify it is healthy with keys loaded."""
+    osmod = _os_module()
+    ok, msg = _start_with_supervisor(repo, osmod)
+    if not ok:
+        return False, msg
+
+    CONSOLE.print("  Waiting for proxy to become healthy...", end="")
+    ok, vmsg = _verify(repo, expected_keys)
+    if not ok:
+        CONSOLE.print(f" [red]✘[/red]")
+        return False, vmsg
+    CONSOLE.print(f" [green]✓[/green] {vmsg}")
+
+    return True, vmsg
 
 
 def _show_summary(repo: Path, added: int, total: int,
@@ -153,11 +194,11 @@ def _show_exit(repo: Path, started_ok: bool) -> None:
         CONSOLE.print(f"  PID file: {core.pid_file(repo)}")
         CONSOLE.print("\n  To stop the proxy:")
         if core.is_windows():
-            CONSOLE.print("    Task Manager → end the python.exe process, or")
-            CONSOLE.print("    run:  taskkill /F /IM python.exe /T")
+            CONSOLE.print("    taskkill /F /IM python.exe /T")
         else:
             CONSOLE.print(f"    kill $(cat {core.pid_file(repo)})")
-        CONSOLE.print("\n  To restart later, re-run this installer.")
+        CONSOLE.print("\n  To manage it later, run:  atlas status | atlas stop | atlas start")
+        CONSOLE.print("  (if you installed the CLI shim during setup).")
     else:
         CONSOLE.print(f"\n[red]✗ Setup failed.[/red]")
         log = core.log_file(repo)
@@ -168,6 +209,8 @@ def _show_exit(repo: Path, started_ok: bool) -> None:
 def run_wizard(repo: Path, venv_py: Path) -> int:
     """Run the simplified setup flow. Returns 0 on success, 1 on failure."""
     _intro()
+
+    osmod = _os_module()
 
     # ---- Step 2: Collect keys ----
     keys = _collect_keys(repo)
@@ -181,18 +224,33 @@ def run_wizard(repo: Path, venv_py: Path) -> int:
     CONSOLE.print(f"\n[green]✓[/green] Saved {added} new key(s) "
                   f"({total} total) to {core.key_file(repo)}")
 
-    # Write runtime provider config (OpenRouter)
+    # Write runtime provider config (OpenRouter only)
     core.write_runtime_provider(repo, "openrouter")
 
-    # ---- Step 3: Start + verify ----
-    CONSOLE.print("\n[cyan]Starting proxy...[/cyan]")
+    # ---- Step 3: Start proxy with supervisor (stays alive) ----
+    CONSOLE.print("\n[cyan]Starting proxy (stays alive after setup)...[/cyan]")
     started_ok, message = _start_and_verify(repo, venv_py, len(keys))
 
-    # ---- Step 4: Summary + exit ----
-    _show_summary(repo, added, total, started_ok, message)
-    _show_exit(repo, started_ok)
+    if not started_ok:
+        CONSOLE.print("\n[red]✗ Proxy failed to start.[/red]")
+        log = core.log_file(repo)
+        if log.exists():
+            CONSOLE.print(f"  Log tail: {log.read_text()[-500:]}")
+        return 1
 
-    return 0 if started_ok else 1
+    # ---- Step 5: Optional CLI shim ----
+    CONSOLE.print("\n[cyan]Optional: install `atlas` CLI?[/cyan]")
+    CONSOLE.print("  This lets you run `atlas status`, `atlas stop`, `atlas start` later.")
+    if Confirm.ask("Install CLI shim?", default=True):
+        shim_ok, shim_msg = _install_cli_shim(repo, osmod)
+        shim_style = "[green]✓[/green]" if shim_ok else "[red]✘[/red]"
+        CONSOLE.print(f"  {shim_style} {shim_msg}")
+
+    # ---- Step 6: Summary + exit ----
+    _show_summary(repo, added, total, True, message)
+    _show_exit(repo, True)
+
+    return 0
 
 
 def main() -> int:

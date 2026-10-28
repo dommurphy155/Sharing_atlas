@@ -31,6 +31,9 @@ RUNTIME_PROVIDER_FILE = "data/proxy_data/runtime_provider.json"
 DEFAULT_PORT = 8777  # proxy.config.LISTEN_PORT default (this fork)
 HEALTH_PATH = "/health"
 
+SERVICE_NAME = "atlas-proxy.service"
+"""systemd unit / launchd job / scheduled-task name. Shared across backends."""
+
 
 # ---------------------------------------------------------------------------
 # OS detection
