@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .utils import loads
 from .system_prompt import _inject_system_override_openai, _inject_system_override_anthropic
-from .config import get_logger
+from .config import get_logger, PROVIDER, REASONING_MODE
 
 log = get_logger(__name__)
 
@@ -1697,6 +1697,72 @@ def _strip_private_keys(messages: List[Dict]) -> List[Dict]:
     return messages
 
 
+# ---------------------------------------------------------------------------
+# Message-level reasoning deduplication
+# ---------------------------------------------------------------------------
+
+# Per (provider, model) cache of the working reasoning mode.  Once a provider
+#+model rejects duplicate `reasoning`/`reasoning_content`, later requests
+# start in strip mode with no wasted round trip.
+_REASONING_MODE_CACHE: dict[tuple[str, str], str] = {}
+
+
+def _resolve_reasoning_mode(
+    model: str, override: Optional[str] = None
+) -> str:
+    """Resolve the reasoning normalization mode.
+
+    Precedence: per-(provider,model) cache > explicit override > env default
+    (ATLAS_REASONING_MODE, default "dedupe").
+    """
+    cache_key = (PROVIDER, model)
+    if cache_key in _REASONING_MODE_CACHE:
+        return _REASONING_MODE_CACHE[cache_key]
+    if override:
+        return override
+    return REASONING_MODE
+
+
+def _cache_reasoning_mode(model: str, mode: str) -> None:
+    """Remember that (provider, model) works with *mode*."""
+    _REASONING_MODE_CACHE[(PROVIDER, model)] = mode
+
+
+def _normalize_message_reasoning(
+    messages: List[Dict], mode: str = "dedupe"
+) -> List[Dict]:
+    """Normalize message-level reasoning / reasoning_content duplicates.
+
+    Claude Code emits assistant messages with both `reasoning` and
+    `reasoning_content` (identical strings). Some providers alias them to the
+    same serde field and HTTP 400 with "duplicate field reasoning_content".
+
+    mode:
+      - dedupe: if both present, keep `reasoning` (non-empty preferred),
+        drop `reasoning_content`
+      - strip: drop both from assistant messages
+      - passthrough: leave messages untouched
+    """
+    if mode == "passthrough" or not isinstance(messages, list):
+        return messages
+    for m in messages:
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        has_reasoning = "reasoning" in m
+        has_reasoning_content = "reasoning_content" in m
+        if not has_reasoning and not has_reasoning_content:
+            continue
+        if mode == "strip":
+            m.pop("reasoning", None)
+            m.pop("reasoning_content", None)
+        elif mode == "dedupe" and has_reasoning and has_reasoning_content:
+            if m.get("reasoning"):
+                m.pop("reasoning_content", None)
+            else:
+                m.pop("reasoning", None)
+    return messages
+
+
 def _sanitize_body(body: Dict[str, Any], *, target: str) -> Dict[str, Any]:
     """Drop keys that are known to cause provider 400s after we have
     normalized the ones we understand.  Keep everything in _SAFE_FORWARD
@@ -1726,7 +1792,9 @@ def _apply_max_tokens_alias(body: Dict[str, Any], *, prefer_completion: bool = F
 # Public prepare functions
 # ---------------------------------------------------------------------------
 
-def prepare_chat_body(body: Dict[str, Any]) -> Dict[str, Any]:
+def prepare_chat_body(
+    body: Dict[str, Any], reasoning_mode: Optional[str] = None
+) -> Dict[str, Any]:
     """Normalize an incoming chat/completions body for OpenRouter.
 
     Accepts pure OpenAI, pure Anthropic, or mixed harness payloads.
@@ -1736,6 +1804,10 @@ def prepare_chat_body(body: Dict[str, Any]) -> Dict[str, Any]:
 
     # Work on a shallow copy so we never mutate the caller's dict
     body = dict(body)
+
+    # Resolve reasoning normalization mode: cache > override > env default
+    _model = body.get("model", "") or get_default_model()
+    _mode = _resolve_reasoning_mode(_model, reasoning_mode)
 
     # ----- Codex / empty request handling -----
     if not body.get("messages") and not body.get("prompt"):
@@ -1771,6 +1843,12 @@ def prepare_chat_body(body: Dict[str, Any]) -> Dict[str, Any]:
         # promoted into a user multimodal message for Chat Completions.
         elif _messages_have_tool_images(msgs):
             body["messages"] = _normalize_openai_tool_images(msgs)
+
+    # ----- message-level reasoning deduplication -----
+    if "messages" in body and isinstance(body["messages"], list):
+        body["messages"] = _normalize_message_reasoning(
+            body["messages"], mode=_mode
+        )
 
     # ----- stop -----
     if "stop_sequences" in body and "stop" not in body:
@@ -1825,7 +1903,9 @@ def prepare_chat_body(body: Dict[str, Any]) -> Dict[str, Any]:
     return body
 
 
-def prepare_messages_body(body: Dict[str, Any]) -> Dict[str, Any]:
+def prepare_messages_body(
+    body: Dict[str, Any], reasoning_mode: Optional[str] = None
+) -> Dict[str, Any]:
     """Normalize an incoming Anthropic /messages body for OpenRouter.
 
     Accepts pure Anthropic, pure OpenAI, or mixed harness payloads.
@@ -1834,6 +1914,10 @@ def prepare_messages_body(body: Dict[str, Any]) -> Dict[str, Any]:
     from .config import get_force_default_model, get_default_model
 
     body = dict(body)
+
+    # Resolve reasoning normalization mode: cache > override > env default
+    _model = body.get("model", "") or get_default_model()
+    _mode = _resolve_reasoning_mode(_model, reasoning_mode)
 
     # Same model resolution policy as prepare_chat_body: force to default
     # when per-provider flag is set or model is absent; otherwise pass through.
@@ -1868,6 +1952,12 @@ def prepare_messages_body(body: Dict[str, Any]) -> Dict[str, Any]:
             if system and "system" not in body:
                 body["system"] = system
         # else: pure Anthropic messages left alone
+
+    # ----- message-level reasoning deduplication -----
+    if "messages" in body and isinstance(body["messages"], list):
+        body["messages"] = _normalize_message_reasoning(
+            body["messages"], mode=_mode
+        )
 
     # ----- stop -----
     if "stop" in body and "stop_sequences" not in body:

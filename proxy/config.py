@@ -522,6 +522,13 @@ LOG_LEVEL: str = _env("LOG_LEVEL", "INFO")
 LOG_JSON: bool = _env_bool("LOG_JSON", False)
 LOG_REQUEST_ID: bool = _env_bool("LOG_REQUEST_ID", True)
 
+# Reasoning message normalization mode (for Claude Code payloads where
+# assistant messages carry both `reasoning` and `reasoning_content`).
+# dedupe: keep `reasoning`, drop `reasoning_content` when both present
+# strip:  drop both from assistant messages
+# passthrough: leave messages untouched
+REASONING_MODE: str = _env("ATLAS_REASONING_MODE", "dedupe")
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -575,4 +582,6 @@ __all__ = [
     "SAVE_PAYLOAD_FILES", "PAYLOAD_DIR",
     # Logging
     "LOG_LEVEL", "LOG_JSON", "LOG_REQUEST_ID", "get_logger", "log",
+    # Reasoning normalization
+    "REASONING_MODE",
 ]

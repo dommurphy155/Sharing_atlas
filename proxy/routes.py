@@ -25,7 +25,13 @@ from .config import (
     provider_is_openai_compatible,
 )
 from .proxy import ProxyCore
-from .translation import prepare_chat_body, prepare_messages_body, openai_response_to_anthropic, openai_sse_to_anthropic_sse
+from .translation import (
+    prepare_chat_body,
+    prepare_messages_body,
+    openai_response_to_anthropic,
+    openai_sse_to_anthropic_sse,
+    _cache_reasoning_mode,
+)
 from .utils import dumps, loads, request_id, ws_request_id
 from . import prettylog as pl
 
@@ -285,6 +291,21 @@ def _atlas_tool_call_item(state, status="completed", include_args=True):
 
 # Set by main.py during lifespan startup
 proxy: Optional[ProxyCore] = None
+
+
+def _is_duplicate_reasoning_error(resp) -> bool:
+    """Detect the serde 400 where `reasoning`/`reasoning_content` alias
+    collide upstream (model-dependent; not all providers reject it)."""
+    if resp is None:
+        return False
+    try:
+        body = loads(resp.body) if hasattr(resp, "body") else resp
+        text = dumps(body)
+        if isinstance(text, bytes):
+            text = text.decode("utf-8", "replace")
+        return "duplicate field" in text and "reasoning_content" in text
+    except Exception:
+        return False
 
 
 @router.get("/")
@@ -916,6 +937,26 @@ async def chat_completions(request: Request) -> Response:
         stream=stream,
         request_id=rid,
     )
+
+    # Self-healing retry: model-dependent serde rejects duplicate
+    # reasoning/reasoning_content.  If upstream 400s, rebuild with
+    # strip mode, cache the working mode per (provider, model), retry once.
+    if (
+        not stream
+        and resp.status_code == 400
+        and _is_duplicate_reasoning_error(resp)
+    ):
+        model = body.get("model", "")
+        _cache_reasoning_mode(model, "strip")
+        retry_body = prepare_chat_body(loads(dumps(body)), reasoning_mode="strip")
+        resp = await proxy.forward(
+            "POST",
+            get_chat_url(),
+            body=dumps(retry_body),
+            stream=False,
+            request_id=rid,
+        )
+
     return resp
 
 @router.post("/v1/messages")
@@ -975,6 +1016,30 @@ async def messages(request: Request) -> Response:
         stream=stream,
         request_id=rid,
     )
+
+    # Self-healing retry: model-dependent serde rejects duplicate
+    # reasoning/reasoning_content.  If upstream 400s, rebuild with
+    # strip mode, cache the working mode per (provider, model), retry once.
+    if (
+        not stream
+        and resp.status_code == 400
+        and _is_duplicate_reasoning_error(resp)
+    ):
+        model = body.get("model", "")
+        _cache_reasoning_mode(model, "strip")
+        retry_body = (
+            prepare_chat_body(loads(dumps(body)), reasoning_mode="strip")
+            if provider_is_openai_compatible()
+            else prepare_messages_body(loads(dumps(body)), reasoning_mode="strip")
+        )
+        resp = await proxy.forward(
+            "POST",
+            upstream_url,
+            body=dumps(retry_body),
+            extra_headers=extra,
+            stream=False,
+            request_id=rid,
+        )
 
     # HF provider: convert OpenAI response → Anthropic /messages shape
     # HF/NVIDIA: convert OpenAI response → Anthropic /messages shape
