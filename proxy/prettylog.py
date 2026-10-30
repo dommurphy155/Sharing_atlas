@@ -60,7 +60,11 @@ def _use_color() -> bool:
         return True
     if COLOR_MODE == "never":
         return False
-    return sys.stdout.isatty() or bool(os.environ.get("JOURNAL_STREAM"))
+    try:
+        is_tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
+    except (OSError, ValueError):
+        is_tty = False
+    return is_tty or bool(os.environ.get("JOURNAL_STREAM"))
 
 
 USE_COLOR = _use_color()
@@ -280,6 +284,8 @@ def mirror_file(path: Optional[Path] = None) -> bool:
             target,
             maxBytes=LOG_FILE_MAX_BYTES,
             backupCount=LOG_FILE_BACKUPS,
+            encoding="utf-8",
+            errors="backslashreplace",
         )
         fh.setFormatter(_PlainFormatter())
         root.addHandler(fh)

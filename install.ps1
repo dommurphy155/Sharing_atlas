@@ -11,7 +11,10 @@
 
 [CmdletBinding()]
 param(
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$Check,
+    [switch]$Uninstall,
+    [switch]$Install
 )
 
 $ErrorActionPreference = "Stop"
@@ -142,6 +145,39 @@ if ($DryRun) {
     Invoke-Python $VenvPython @("-m", "pip", "install", "--quiet", "-r", $Requirements) "Dependency installation failed"
 
     Write-Host "DRY-RUN: bootstrap completed successfully."
+    exit 0
+}
+
+# ---- -Check: run diagnostics
+if ($Check) {
+    Write-Host "-> running diagnostics"
+    if (Test-Path $VenvPython -PathType Leaf) {
+        Push-Location $RepoRoot
+        try {
+            & $VenvPython -c "import sys; sys.path.insert(0, '.'); from setup import core; ok, msg = core._os_module().verify_startup(core.repo_root()); print(msg); sys.exit(0 if ok else 1)"
+            $ExitCode = $LASTEXITCODE
+        } finally {
+            Pop-Location
+        }
+        exit $ExitCode
+    } else {
+        Write-Host "ERR: venv not found — run install first" -ForegroundColor Red
+        exit 1
+    }
+}
+
+# ---- -Uninstall: stop proxy and remove runtime config
+if ($Uninstall) {
+    Write-Host "-> stopping proxy and cleaning up"
+    if (Test-Path $VenvPython -PathType Leaf) {
+        Push-Location $RepoRoot
+        try {
+            & $VenvPython -c "import sys; sys.path.insert(0, '.'); from setup import core; ok, msg = core._os_module().uninstall_runtime(core.repo_root()); print(msg); sys.exit(0 if ok else 1)"
+        } finally {
+            Pop-Location
+        }
+    }
+    Write-Host "-> uninstall complete"
     exit 0
 }
 

@@ -142,7 +142,7 @@ def has_systemctl() -> bool:
 
 
 def get_proxy_url() -> str:
-    return os.environ.get("ATLAS_PROXY_URL", "http://127.0.0.1:8788")
+    return os.environ.get("ATLAS_PROXY_URL", "http://127.0.0.1:8000")
 
 
 def _resolve_listen() -> tuple[str, int]:
@@ -156,7 +156,7 @@ def _resolve_listen() -> tuple[str, int]:
         return LISTEN_HOST, LISTEN_PORT
     except Exception:
         h = os.environ.get("LISTEN_HOST", "0.0.0.0")
-        p = int(os.environ.get("LISTEN_PORT", "8788"))
+        p = int(os.environ.get("LISTEN_PORT", "8000"))
         return h, p
 
 
@@ -217,14 +217,15 @@ def cmd_install(args) -> int:
     """Atlas proxy + coding-harness setup wizard.
 
     Drives: venv/deps -> CLI shim -> auto-start -> provider selection -> key
-    import -> harness install/configure -> smoke test -> launch.
+    import via the OS-native installer bootstrap (install.sh / install.ps1).
     """
-    import importlib
-    sys.path.insert(0, str(REPO_ROOT))
-    wizard = importlib.import_module("setup.wizard")
-    return wizard.install_and_run(
-        REPO_ROOT, dry_run=getattr(args, "dry_run", False)
-    )
+    dry_run = getattr(args, "dry_run", False)
+    if dry_run:
+        CONSOLE.print(yellow("  DRY-RUN — no changes will be made"))
+    cmd = _installer_cmd("install", dry_run)
+    if not cmd:
+        return 1
+    return subprocess.call(cmd)
 
 
 def cmd_uninstall(args) -> int:
@@ -384,16 +385,21 @@ def cmd_doctor(args) -> int:
 def _installer_cmd(action: str, dry_run: bool = False) -> list[str]:
     """Build the command to invoke the OS-native installer bootstrap.
 
-    action: 'check' or 'uninstall'. Linux/macOS -> bash install.sh;
-    Windows -> powershell -File install.ps1. Installer scripts live at the
-    repo root (install.sh / install.ps1).
+    action: 'install', 'check', or 'uninstall'.
+    Linux/macOS -> bash install.sh [--check|--uninstall] [--dry-run];
+    Windows -> powershell -File install.ps1 [-Check|-Uninstall] [-DryRun].
     """
     if platform.system().lower().startswith("win"):
         script = REPO_ROOT / "install.ps1"
         if not script.exists():
             CONSOLE.print(red(f"ERR: installer not found at {script}"))
             return []
-        flag = "-Check" if action == "check" else "-Uninstall"
+        if action == "install":
+            flag = "-Install"
+        elif action == "check":
+            flag = "-Check"
+        else:
+            flag = "-Uninstall"
         cmd = ["powershell", "-NoProfile", "-NonInteractive",
                "-ExecutionPolicy", "ByPass", "-File", str(script), flag]
         if dry_run:
@@ -403,11 +409,18 @@ def _installer_cmd(action: str, dry_run: bool = False) -> list[str]:
     if not script.exists():
         CONSOLE.print(red(f"ERR: installer not found at {script}"))
         return []
-    flag = "--check" if action == "check" else "--uninstall"
-    cmd = ["bash", str(script), flag]
+    if action == "install":
+        flag = ""
+    elif action == "check":
+        flag = "--check"
+    else:
+        flag = "--uninstall"
+    parts = ["bash", str(script)]
+    if flag:
+        parts.append(flag)
     if dry_run:
-        cmd.append("--dry-run")
-    return cmd
+        parts.append("--dry-run")
+    return parts
 
 
 def cmd_check(args) -> int:

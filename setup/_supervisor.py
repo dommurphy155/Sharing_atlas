@@ -107,10 +107,49 @@ def make_posix_shim(repo: Path, bin_dir: Path) -> tuple[bool, str]:
 
     _chmodx(shim)
 
-    on_path = str(bin_dir) in os.environ.get("PATH", "").split(os.pathsep)
-    hint = "" if on_path else f" Add {bin_dir} to PATH to run atlas globally."
+    # Persist ~/.local/bin on PATH across new shells / reboots.
+    # Append to every rc that may exist; idempotent (skip if already present).
+    _persist_posix_path(bin_dir)
 
+    on_path = str(bin_dir) in os.environ.get("PATH", "").split(os.pathsep)
+    hint = "" if on_path else f" Add {bin_dir} to PATH (or reopen a shell)."
     return True, f"Installed CLI wrapper: {shim}.{hint}"
+
+
+def _persist_posix_path(bin_dir: Path) -> None:
+    """Idempotently append *bin_dir* to common shell rc files so a brand-new
+    shell (reopened terminal, fresh SSH session, Git Bash) can resolve
+    ``atlas`` even when ``~/.local/bin`` is not already on PATH.
+
+    Touches rc files only as appends — never rewrites.  Skipped when the path
+    token already appears in the file.  macOS defaults to zsh (covers
+    ``~/.zshrc`` / ``~/.zprofile``); Linux defaults to bash (covers
+    ``~/.bashrc`` / ``~/.profile``); Git Bash reads ``~/.bashrc``.
+    """
+    line = str(bin_dir)
+    for rc in (
+        Path.home() / ".bashrc",
+        Path.home() / ".zshrc",
+        Path.home() / ".profile",
+        Path.home() / ".zprofile",
+    ):
+        try:
+            if rc.exists() and line in rc.read_text(encoding="utf-8", errors="replace"):
+                continue
+        except OSError:
+            continue
+        snippet = (
+            "\n# Added by Atlas installer\n"
+            f'case ":{os.pathsep}${{PATH}}{os.pathsep}:" in\n'
+            f'  *":{line}:"*) ;;  # already on PATH\n'
+            f'  *) export PATH="${{PATH}}{os.pathsep}{line}" ;;\n'
+            "esac\n"
+        )
+        try:
+            with rc.open("a", encoding="utf-8") as fh:
+                fh.write(snippet)
+        except OSError:
+            pass  # best-effort
 
 
 def make_windows_shim(repo, bin_dir):
@@ -120,7 +159,6 @@ def make_windows_shim(repo, bin_dir):
     python = Path(core.venv_python(repo))
     target = repo / "atlas" / "bin" / "atlas"
     bin_dir = Path(bin_dir).expanduser()
-    shim = bin_dir / "atlas.cmd"
 
     if not python.is_file():
         return False, f"Virtualenv Python not found: {python}"
@@ -128,7 +166,10 @@ def make_windows_shim(repo, bin_dir):
         return False, f"Atlas CLI not found: {target}"
 
     bin_dir.mkdir(parents=True, exist_ok=True)
-    shim.write_text(
+
+    # --- PowerShell / cmd wrapper (atlas.cmd) ---
+    cmd_shim = bin_dir / "atlas.cmd"
+    cmd_shim.write_text(
         '@echo off\r\n'
         f'"{python}" "{target}" %*\r\n'
         'exit /b %ERRORLEVEL%\r\n',
@@ -136,6 +177,23 @@ def make_windows_shim(repo, bin_dir):
         newline="",
     )
 
+    # --- POSIX wrapper (atlas, no extension) for Git Bash / MSYS2 ---
+    # Git Bash does not resolve .cmd files when you type a bare command,
+    # so we also drop a #!/bin/sh wrapper next to the .cmd shim.
+    posix_shim = bin_dir / "atlas"
+    posix_shim.write_text(
+        "#!/bin/sh\n"
+        f"# {_shim_header()}\n"
+        f'exec "{python}" "{target}" "$@"\n',
+        encoding="utf-8",
+        newline="",
+    )
+    try:
+        _chmodx(posix_shim)
+    except OSError:
+        pass
+
+    # --- Register bin_dir in the User PATH via the registry ---
     try:
         with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER, "Environment", 0,
@@ -155,9 +213,30 @@ def make_windows_shim(repo, bin_dir):
                 entries.append(str(bin_dir))
                 winreg.SetValueEx(key, "Path", 0, value_type, ";".join(entries))
 
-        return True, f"Installed {shim} and registered its directory in user PATH."
+            _broadcast_env_change()
+
+        return True, f"Installed {cmd_shim} + {posix_shim} and registered {bin_dir} in user PATH."
     except Exception as exc:
         return False, f"Could not register Atlas in user PATH: {exc}"
+
+
+def _broadcast_env_change(timeout: int = 5) -> None:
+    """Broadcast WM_SETTINGCHANGE so shells opened *after* install pick up the
+    new User PATH without requiring a logoff.  No-op on non-Windows.
+    """
+    try:
+        import ctypes
+        SendMessageTimeout = ctypes.windll.user32.SendMessageTimeoutW
+        HWND_BROADCAST = 0xFFFF
+        WM_SETTINGCHANGE = 0x001A
+        SendMessageTimeout(
+            HWND_BROADCAST, WM_SETTINGCHANGE, 0,
+            "Environment", 0x0002,  # SMTO_ABORTIFHUNG
+            timeout, 0,
+        )
+    except Exception:
+        pass  # best-effort
+
 
 def _chmodx(path: Path) -> None:
     """Ensure the POSIX wrapper is executable."""

@@ -53,13 +53,15 @@ for _console_stream in (sys.stdout, sys.stderr):
 _prettylog.attach()
 _prettylog.mirror_file()
 
-# Optional high-performance event loop
-try:
-    import uvloop
-
-    uvloop.install()
-except ImportError:
-    pass
+# Optional high-performance event loop. uvloop is not supported on Windows.
+_USE_UVLOOP = False
+if sys.platform != "win32":
+    try:
+        import uvloop
+        uvloop.install()
+        _USE_UVLOOP = True
+    except (ImportError, RuntimeError, ValueError):
+        pass
 
 
 def _load_provider_keys() -> list[str]:
@@ -106,11 +108,11 @@ async def lifespan(app: FastAPI):
     _key_file = KEY_FILE
     try:
         import random
-        with open(_key_file) as f:
+        with open(_key_file, "r", encoding="utf-8") as f:
             lines = [ln for ln in f.read().splitlines() if ln.strip()]
         random.shuffle(lines)
         tmp = Path(str(_key_file) + ".tmp")
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
             f.write("\n".join(lines) + "\n")
         os.replace(tmp, _key_file)
     except FileNotFoundError:
@@ -257,8 +259,8 @@ def main() -> None:
         host=LISTEN_HOST,
         port=LISTEN_PORT,
         log_level=LOG_LEVEL.lower(),
-        loop="uvloop" if "uvloop" in sys.modules else "asyncio",
-        http="httptools",
+        loop="uvloop" if _USE_UVLOOP else "asyncio",
+        http="auto",
         timeout_keep_alive=int(KEEPALIVE_EXPIRY),
         access_log=False,
     )
