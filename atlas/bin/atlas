@@ -400,7 +400,16 @@ def _installer_cmd(action: str, dry_run: bool = False) -> list[str]:
             flag = "-Check"
         else:
             flag = "-Uninstall"
-        cmd = ["powershell", "-NoProfile", "-NonInteractive",
+        import shutil
+        powershell = (
+            shutil.which("pwsh")
+            or shutil.which("powershell")
+            or shutil.which("powershell.exe")
+        )
+        if not powershell:
+            CONSOLE.print(red("ERR: PowerShell was not found (pwsh or powershell.exe)."))
+            return []
+        cmd = [powershell, "-NoProfile", "-NonInteractive",
                "-ExecutionPolicy", "ByPass", "-File", str(script), flag]
         if dry_run:
             cmd.append("-DryRun")

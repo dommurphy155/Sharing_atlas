@@ -70,7 +70,9 @@ def uninstall_runtime(repo: Path) -> tuple[bool, str]:
         venv_py = core.venv_python(repo)
         runtime = rt.get_runtime(repo, venv_py, service_name(repo))
         runtime.cleanup()
-        return True, "Runtime stopped and configuration removed."
+        runtime_file = repo / "data" / "runtime.json"
+        runtime_file.unlink(missing_ok=True)
+        return True, "Runtime stopped; scheduled task and runtime configuration removed."
     except Exception as exc:
         return False, f"Runtime cleanup failed: {type(exc).__name__}: {exc}"
 

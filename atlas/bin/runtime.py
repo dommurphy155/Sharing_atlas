@@ -1087,11 +1087,22 @@ class WindowsRuntime:
     def cleanup(self) -> None:
         from pathlib import Path
 
+        # Stop the running process before removing its login task.
         try:
             self.stop()
         except Exception:
             pass
-        (Path(self.repo_root) / "data" / "run.pid").unlink(missing_ok=True)
+
+        # Remove the persistent ONLOGON task; it must not survive uninstall.
+        try:
+            _run_quiet(["schtasks", "/Delete", "/TN", self.TASK_NAME, "/F"], timeout=10.0)
+        except Exception:
+            pass
+
+        try:
+            (Path(self.repo_root) / "data" / "run.pid").unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def env_summary(self) -> dict:
         return {"mode": "scheduled-task", "runtime": "detached-process"}

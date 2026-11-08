@@ -73,8 +73,7 @@ def _clear_windows_key_files(repo):
 
 def _collect_keys(repo: Path) -> list[str]:
     """Prompt the user for OpenRouter API keys. Returns the full key list."""
-    if core.is_windows():
-        _clear_windows_key_files(repo)
+    # Preserve existing keys on every platform; collection handles additions.
     target = core.key_file(repo)
     existing = core.read_keys(target)
 

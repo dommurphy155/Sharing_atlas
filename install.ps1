@@ -154,7 +154,8 @@ if ($Check) {
     if (Test-Path $VenvPython -PathType Leaf) {
         Push-Location $RepoRoot
         try {
-            & $VenvPython -c "import sys; sys.path.insert(0, '.'); from setup import core; ok, msg = core._os_module().verify_startup(core.repo_root()); print(msg); sys.exit(0 if ok else 1)"
+            $CheckCode = 'import sys; sys.path.insert(0, "."); from setup import core; ok, msg = core._os_module().verify_startup(core.repo_root()); print(msg); sys.exit(0 if ok else 1)'
+            & $VenvPython -c $CheckCode
             $ExitCode = $LASTEXITCODE
         } finally {
             Pop-Location
@@ -172,7 +173,9 @@ if ($Uninstall) {
     if (Test-Path $VenvPython -PathType Leaf) {
         Push-Location $RepoRoot
         try {
-            & $VenvPython -c "import sys; sys.path.insert(0, '.'); from setup import core; ok, msg = core._os_module().uninstall_runtime(core.repo_root()); print(msg); sys.exit(0 if ok else 1)"
+            $UninstallCode = 'import sys; sys.path.insert(0, "."); from setup import core; ok, msg = core._os_module().uninstall_runtime(core.repo_root()); print(msg); sys.exit(0 if ok else 1)'
+            & $VenvPython -c $UninstallCode
+            if ($LASTEXITCODE -ne 0) { Stop-Installer "Runtime uninstall failed." $LASTEXITCODE }
         } finally {
             Pop-Location
         }
