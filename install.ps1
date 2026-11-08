@@ -1,7 +1,7 @@
 
 <#
 .SYNOPSIS
-    Atlas proxy installer — Windows.
+    Atlas proxy installer - Windows.
 .DESCRIPTION
     Bootstrap dependencies, run the setup wizard, and return its exit code.
 .EXAMPLE
@@ -19,6 +19,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $env:PYTHONDONTWRITEBYTECODE = "1"
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
 
 $RepoRoot = $PSScriptRoot
 $VenvPath = Join-Path $RepoRoot ".venv"
@@ -162,7 +164,7 @@ if ($Check) {
         }
         exit $ExitCode
     } else {
-        Write-Host "ERR: venv not found — run install first" -ForegroundColor Red
+        Write-Host "ERR: venv not found - run install first" -ForegroundColor Red
         exit 1
     }
 }

@@ -243,9 +243,11 @@ def health_check(repo: Path, timeout: float = 8.0) -> tuple[bool, str]:
     url = health_url(repo)
     deadline = time.monotonic() + timeout
     last = "no response"
+    # Loopback must never go through a system/VPN proxy.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=1.0) as r:
+            with opener.open(url, timeout=1.0) as r:
                 if 200 <= r.status < 300:
                     return True, f"healthy ({r.status}) @ {url}"
                 last = f"status {r.status}"

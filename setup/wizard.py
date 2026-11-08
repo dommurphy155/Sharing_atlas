@@ -262,7 +262,7 @@ def run_wizard(repo: Path, venv_py: Path) -> int:
         CONSOLE.print("\n[red]✗ Proxy failed to start.[/red]")
         log = core.log_file(repo)
         if log.exists():
-            CONSOLE.print(f"  Log tail: {log.read_text()[-500:]}")
+            CONSOLE.print(f"  Log tail: {log.read_text(encoding='utf-8', errors='replace')[-500:]}", markup=False, highlight=False)
         return 1
 
     # ---- Step 5: Optional CLI shim ----

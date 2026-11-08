@@ -204,7 +204,7 @@ def is_service_active() -> bool:
 def http_health(url: str) -> tuple[bool, str]:
     import urllib.request
     try:
-        with urllib.request.urlopen(url, timeout=3) as resp:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=3) as resp:
             return True, f"{resp.status} {resp.reason}"
     except Exception as e:
         return False, str(e)

@@ -910,6 +910,7 @@ class WindowsRuntime:
 
         data_dir = self.repo_root / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
+        task_note = "logon task registered"
 
         wrapper = data_dir / "atlas-start.cmd"
         cli = self.repo_root / "atlas" / "bin" / "atlas"
@@ -943,16 +944,16 @@ class WindowsRuntime:
 
             if result.returncode != 0:
                 detail = result.stderr.strip() or result.stdout.strip()
-                return False, f"Could not register logon task: {detail}"
+                task_note = f"logon task not registered ({detail}); no auto-start at login"
 
         except Exception as exc:
-            return False, f"Could not register logon task: {exc}"
+            task_note = f"logon task not registered ({exc}); no auto-start at login"
 
         ok, message = self.start()
         if not ok:
-            return False, f"Logon task registered, but proxy failed to start: {message}"
+            return False, f"proxy failed to start: {message}"
 
-        return True, f"Logon task registered; {message}"
+        return True, f"{task_note}; {message}"
 
     def _schtasks(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess | None:
         return _run_quiet(["schtasks", *args], timeout=10.0)
@@ -982,6 +983,7 @@ class WindowsRuntime:
                     stderr=subprocess.STDOUT,
                     creationflags=flags,
                     close_fds=True,
+                    env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
                 )
             pidfile.write_text(str(proc.pid), encoding="utf-8")
             return True, f"started (pid={proc.pid}, log={self.log_file})"
@@ -1230,7 +1232,10 @@ def install_runtime(repo_root: Path, venv_py: Path,
             continue
 
         # Install/start succeeded — now verify the proxy is actually healthy.
-        healthy, health_msg = check_health(repo_root=repo_root)
+        healthy, health_msg = check_health(
+            timeout_s=(30.0 if env.os == "windows" else HEALTH_TIMEOUT_S),
+            repo_root=repo_root,
+        )
         if not healthy:
             _emit(f"  ! {mode} unhealthy: {health_msg}")
             try:
@@ -1324,9 +1329,11 @@ def check_health(timeout_s: float = HEALTH_TIMEOUT_S,
 
     deadline = time.monotonic() + timeout_s
     last_err = ""
+    # Loopback must never go through a system/VPN proxy.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=0.5) as resp:
+            with opener.open(url, timeout=0.5) as resp:
                 if 200 <= resp.status < 300:
                     return True, f"health check passed ({url})"
                 last_err = f"status {resp.status}"
