@@ -191,7 +191,8 @@ def service_action(action: str) -> bool:
         ok, msg = rt.status()
     else:
         ok, msg = False, f"unknown action: {action}"
-    CONSOLE.print((_c('green', 'OK') if ok else _c('red', 'ERR')) + f": {msg}")
+    from rich.markup import escape as _esc
+    CONSOLE.print((_c('green', 'OK') if ok else _c('red', 'ERR')) + f": {_esc(msg)}")
     return ok
 
 

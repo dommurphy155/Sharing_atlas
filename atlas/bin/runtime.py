@@ -975,18 +975,31 @@ class WindowsRuntime:
                     getattr(subprocess, "DETACHED_PROCESS", 0)
                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                 )
-                proc = subprocess.Popen(
+                proc = _popen_detached(
                     [str(self.venv_py), "-m", "proxy.main"],
+                    flags,
                     cwd=str(self.repo_root),
                     stdin=subprocess.DEVNULL,
                     stdout=log,
                     stderr=subprocess.STDOUT,
-                    creationflags=flags,
                     close_fds=True,
                     env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
                 )
             pidfile.write_text(str(proc.pid), encoding="utf-8")
-            return True, f"started (pid={proc.pid}, log={self.log_file})"
+            # Do not report "started" blindly: confirm the process survives startup.
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline:
+                code = proc.poll()
+                if code is not None:
+                    pidfile.unlink(missing_ok=True)
+                    return False, (
+                        f"proxy exited during startup (exit code {code}); last log lines:\n"
+                        f"{_tail_text(self.log_file)}"
+                    )
+                if check_health(timeout_s=0.5, repo_root=self.repo_root)[0]:
+                    return True, f"started and healthy (pid={proc.pid}, log={self.log_file})"
+                time.sleep(0.5)
+            return True, f"started, still warming up (pid={proc.pid}, log={self.log_file})"
         except Exception as exc:
             return False, f"could not start proxy: {type(exc).__name__}: {exc}"
 
@@ -1084,6 +1097,7 @@ class WindowsRuntime:
             return 1
 
         try:
+            print(f"[atlas] proxy process: {self.status()[1]}  (lines below are history from run.log, not live state)", flush=True)
             with self.log_file.open("r", encoding="utf-8", errors="replace") as log:
                 lines = log.readlines()
                 print("".join(lines[-40:]), end="")
@@ -1483,6 +1497,27 @@ def _mode_usable(mode: RuntimeMode, env: RuntimeEnv) -> bool:
 # ---------------------------------------------------------------------------
 # Tiny helpers used by the wizard
 # ---------------------------------------------------------------------------
+
+CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+
+
+def _popen_detached(args, flags, **kw):
+    """Spawn a detached process, breaking away from the caller job object when
+    allowed (Task Scheduler, SSH and terminal wrappers kill job members when the
+    job closes). Falls back to a plain detached spawn if the job forbids it."""
+    try:
+        return subprocess.Popen(args, creationflags=flags | CREATE_BREAKAWAY_FROM_JOB, **kw)
+    except OSError:
+        return subprocess.Popen(args, creationflags=flags, **kw)
+
+
+def _tail_text(path: Path, n: int = 15) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        return f"(could not read log: {exc})"
+    return "\n".join(lines[-n:]) or "(log is empty)"
+
 
 def shlex_quote(s: str) -> str:
     """Quote a string for safe inclusion in a shell command."""
