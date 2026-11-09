@@ -58,45 +58,113 @@ function Invoke-Python {
     }
 }
 
-# ---- Locate a working Python 3.10+
-$PythonCommand = $null
+# ---- Locate a working Python 3.10+ installation
+function Find-WorkingPython {
+    $Candidates = @()
 
-foreach ($CommandName in @("python", "python3", "py")) {
-    $Candidates = @(Get-Command $CommandName -CommandType Application -ErrorAction SilentlyContinue)
+    foreach ($CommandName in @("python", "python3", "py")) {
+        $Found = @(Get-Command $CommandName -CommandType Application -All -ErrorAction SilentlyContinue)
 
+        foreach ($Item in $Found) {
+            $CandidatePath = $Item.Source
+            if (-not $CandidatePath) { $CandidatePath = $Item.Path }
+            if ($CandidatePath) {
+                $Candidates += [pscustomobject]@{
+                    Path = $CandidatePath
+                    Launcher = ($CommandName -eq "py")
+                }
+            }
+        }
+    }
+
+    # Check common per-user installation locations, even if PATH is stale.
+    foreach ($Version in @("313", "312", "311", "310")) {
+        $KnownPath = Join-Path $env:LOCALAPPDATA "Programs\Python\Python$Version\python.exe"
+        if (Test-Path $KnownPath -PathType Leaf) {
+            $Candidates += [pscustomobject]@{
+                Path = $KnownPath
+                Launcher = $false
+            }
+        }
+    }
+
+    $Seen = @{}
     foreach ($Candidate in $Candidates) {
-        $CandidatePath = $Candidate.Source
+        $CandidatePath = $Candidate.Path
 
-        if (-not $CandidatePath) {
-            $CandidatePath = $Candidate.Path
-        }
+        # Ignore Windows Store execution aliases. They are not Python installations.
+        if ($CandidatePath -match '(?i)\\Microsoft\\WindowsApps\\') { continue }
+        if ($Seen.ContainsKey($CandidatePath)) { continue }
+        $Seen[$CandidatePath] = $true
 
-        if (-not $CandidatePath) {
-            continue
-        }
+        try {
+            if ($Candidate.Launcher) {
+                & $CandidatePath -3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" *> $null
+            }
+            else {
+                & $CandidatePath -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" *> $null
+            }
 
-        # The Python launcher needs a version selector.
-        if ($CommandName -eq "py") {
-            & $CandidatePath -3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" 2>$null
+            $CandidateExitCode = $LASTEXITCODE
+            if ($CandidateExitCode -eq 0) {
+                return $Candidate
+            }
         }
-        else {
-            & $CandidatePath -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" 2>$null
-        }
-
-        if ($LASTEXITCODE -eq 0) {
-            $PythonCommand = $CandidatePath
-            break
+        catch {
+            # Broken aliases and stale PATH entries are skipped.
         }
     }
 
-    if ($PythonCommand) {
-        break
+    return $null
+}
+
+$PythonFound = Find-WorkingPython
+
+if (-not $PythonFound) {
+    Write-Host "-> Python 3.10+ was not found. Checking for WinGet..."
+
+    $Winget = Get-Command winget -CommandType Application -ErrorAction SilentlyContinue
+
+    if ($Winget) {
+        Write-Host "-> Installing Python 3.12 for the current Windows user..."
+        try {
+            & $Winget.Source install --id Python.Python.3.12 --exact --scope user --silent --accept-package-agreements --accept-source-agreements
+            $WingetExitCode = $LASTEXITCODE
+        }
+        catch {
+            $WingetExitCode = 1
+            Write-Host "WinGet installation error: $_" -ForegroundColor Yellow
+        }
+
+        # Refresh PATH from Windows user and machine environment settings.
+        $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        $MachinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+        $env:Path = "$UserPath;$MachinePath;$env:Path"
+
+        $PythonFound = Find-WorkingPython
+
+        if (-not $PythonFound) {
+            Write-Host "WinGet did not produce a usable Python installation (exit code: $WingetExitCode)." -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host "WinGet is not available on this machine." -ForegroundColor Yellow
     }
 }
 
-if (-not $PythonCommand) {
-    Stop-Installer "No working Python 3.10+ installation found. Install Python 3.10 or newer, then reopen PowerShell." 1
+if (-not $PythonFound) {
+    Write-Host ""
+    Write-Host "Python 3.10 or newer is required, but automatic installation was unsuccessful." -ForegroundColor Red
+    Write-Host "Install Python 3.12 from the official download page:"
+    Write-Host "https://www.python.org/downloads/windows/"
+    Write-Host ""
+    Write-Host "During installation, enable 'Add python.exe to PATH'."
+    Write-Host "Then close PowerShell, reopen it, and run .\install.ps1 again."
+    Stop-Installer "Python bootstrap could not find or install a working interpreter." 1
 }
+
+$PythonCommand = $PythonFound.Path
+$PythonLauncher = $PythonFound.Launcher
 
 # ---- Read and validate Python version
 $VersionOutput = & $PythonCommand -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>&1
