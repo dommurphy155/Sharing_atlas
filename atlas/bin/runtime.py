@@ -1001,17 +1001,32 @@ class WindowsRuntime:
             pidfile.unlink(missing_ok=True)
             return True, "not running"
 
+        # Check first so a stale PID does not make taskkill fail.
+        running, status_message = self.status()
+        if not running:
+            if status_message == "not running":
+                return True, status_message
+            return False, status_message
+
         try:
             result = subprocess.run(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True, text=True, timeout=10,
             )
             if result.returncode != 0:
-                # Do not remove the PID file if stopping failed.
-                return False, (
+                detail = (
                     result.stderr.strip() or result.stdout.strip()
                     or f"could not stop PID {pid}"
                 )
+
+                # The process may have exited between status() and taskkill.
+                still_running, after_status = self.status()
+                if not still_running and after_status == "not running":
+                    return True, f"already stopped (PID {pid})"
+                if not still_running:
+                    return False, f"{detail}; {after_status}"
+                return False, detail
+
             pidfile.unlink(missing_ok=True)
             return True, f"stopped PID {pid}"
         except Exception as exc:
