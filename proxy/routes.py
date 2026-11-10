@@ -771,6 +771,12 @@ async def responses_api(request: Request) -> Response:
                     continue
                 delta = choices[0].get("delta", {}) or {}
 
+                # Reasoning-only deltas are still visible output — a turn
+                # that produced only reasoning is not a failure.
+                reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                if isinstance(reasoning, str) and reasoning:
+                    emitted_any = True
+
                 tool_calls = delta.get("tool_calls")
                 if tool_calls:
                     for tc in tool_calls:
@@ -1238,10 +1244,15 @@ async def _stream_openai_to_anthropic(rid: str, upstream_url: str, payload: byte
             ):
                 if evt_data is None:
                     continue
+                # Terminal finish_reason events are only meaningful if real
+                # output was produced. Buffer them when nothing has been
+                # emitted yet so a zero-output turn yields exactly one
+                # terminal outcome (the error below), never both.
+                if evt_name == "message_delta" and not emitted_any:
+                    continue
                 # Only real output counts as visible content. Scaffolding
-                # (message_delta with just a stop_reason) does not. Any
-                # delta qualifies; a thinking/tool_use block start means the
-                # model is producing output, not nothing.
+                # does not. Any delta qualifies; a thinking/tool_use block
+                # start means the model is producing output.
                 if evt_name == "content_block_delta":
                     emitted_any = True
                 elif evt_name == "content_block_start":
@@ -1253,11 +1264,16 @@ async def _stream_openai_to_anthropic(rid: str, upstream_url: str, payload: byte
                 yield _sse_event(evt_name, evt_data)
 
         if not emitted_any:
-            # Upstream produced zero visible output. Surface an explicit
-            # error instead of a clean empty turn — an empty successful
-            # assistant message makes the client synthesize a
+            # Upstream produced zero visible output. Close the scaffolding
+            # block first so the event stream is well-formed, then surface
+            # an explicit error instead of a clean empty turn — an empty
+            # successful assistant message makes the client synthesize a
             # "your previous response had no visible output" nudge,
             # which then loops through every later turn.
+            yield _sse_event("content_block_stop", {
+                "type": "content_block_stop",
+                "index": 0,
+            })
             yield _sse_event("error", {
                 "type": "error",
                 "error": {
