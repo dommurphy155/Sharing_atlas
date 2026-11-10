@@ -570,6 +570,27 @@ class ProxyCore:
                                         (time.perf_counter() - t0) * 1000,
                                         len(data_r),
                                     )
+                                    if MAX_RESPONSE_BYTES > 0 and len(data_r) > MAX_RESPONSE_BYTES:
+                                        await self.pool.mark_error(key_idx_r, 413)
+                                        log.warning(
+                                            "req=%s response too large (%d > %d bytes) — returning 413 (400-repair)",
+                                            request_id, len(data_r), MAX_RESPONSE_BYTES,
+                                        )
+                                        return JSONResponse(
+                                            status_code=413,
+                                            content={
+                                                "error": {
+                                                    "message": (
+                                                        f"Response exceeded max size of "
+                                                        f"{MAX_RESPONSE_BYTES} bytes "
+                                                        f"(was {len(data_r)} bytes). "
+                                                        f"Use stream=True for large responses."
+                                                    ),
+                                                    "type": "length",
+                                                }
+                                            },
+                                            headers={"x-request-id": request_id},
+                                        )
                                     return Response(
                                         content=data_r,
                                         status_code=status_r,
