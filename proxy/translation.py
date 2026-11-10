@@ -2084,8 +2084,18 @@ def openai_response_to_anthropic(data: Dict[str, Any], *, rid: str = "") -> Dict
     msg = choice.get("message") or {}
     content_str = msg.get("content") or ""
     tool_calls = msg.get("tool_calls") or []
+    reasoning_strs = [
+        s for s in (msg.get("reasoning_content"), msg.get("reasoning"))
+        if isinstance(s, str) and s.strip()
+    ]
 
     content_blocks: List[Dict[str, Any]] = []
+    if reasoning_strs:
+        # A reasoning-only response is real output, not an empty turn.
+        content_blocks.append({
+            "type": "thinking",
+            "thinking": "\n".join(reasoning_strs),
+        })
     if isinstance(content_str, str) and content_str:
         content_blocks.append({"type": "text", "text": content_str})
 
