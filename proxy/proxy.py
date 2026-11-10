@@ -40,6 +40,14 @@ from . import prettylog as pl
 log = get_logger(__name__)
 
 
+def _is_agentic_harness_gate(status: int, body: bytes) -> bool:
+    """Identify OpenRouter's agentic-harness eligibility rejection."""
+    return (
+        status == 403
+        and b"only available on agentic harnesses" in body.lower()
+    )
+
+
 async def _quiet_cleanup(fn, *args, what: str = "cleanup", rid: str = "") -> None:
     """Run a cleanup callable, logging (not swallowing) any failure at debug level.
 
@@ -77,6 +85,46 @@ def _enforce_default_model(body: Optional[bytes]) -> Optional[bytes]:
     if "model" not in parsed:
         return body
     parsed["model"] = get_default_model()
+    return dumps(parsed)
+
+
+# ---------------------------------------------------------------------------
+# 400 repair-and-retry: after an upstream HTTP 400, resend a *copy* of the
+# payload with suspected-incompatible fields progressively removed.  The
+# first attempt is always sent exactly as translated (no field removal).
+# ---------------------------------------------------------------------------
+_400_REPAIR_FIELDS: tuple[str, ...] = (
+    "reasoning",
+    "reasoning_effort",
+    "parallel_tool_calls",
+)
+_400_REPAIR_MAX_ATTEMPTS: int = 3  # total upstream attempts incl. original
+
+
+def _strip_body_fields(
+    body: Optional[bytes], fields: tuple[str, ...]
+) -> Optional[bytes]:
+    """Return a copy of *body* with the given top-level fields removed.
+
+    Returns re-serialised bytes if any field was removed, else None
+    (so callers know not to retry with an identical payload).  The input
+    is never mutated; non-JSON / non-dict bodies return None.
+    """
+    if body is None:
+        return None
+    try:
+        parsed = loads(body)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    changed = False
+    for f in fields:
+        if f in parsed:
+            parsed.pop(f)
+            changed = True
+    if not changed:
+        return None
     return dumps(parsed)
 
 
@@ -394,6 +442,32 @@ class ProxyCore:
                     )
                     if isinstance(result, StreamingResponse):
                         return result
+                    # --- 400 repair-and-retry for streaming (pre-stream 400) ---
+                    if result.status_code == 400:
+                        for repair_step in range(1, _400_REPAIR_MAX_ATTEMPTS):
+                            repair_fields = _400_REPAIR_FIELDS[:repair_step]
+                            repaired_body = _strip_body_fields(body, repair_fields)
+                            if repaired_body is None:
+                                break
+                            log.warning(
+                                "req=%s attempt=%d/%d upstream HTTP 400 (stream) — "
+                                "retrying without %s",
+                                request_id,
+                                repair_step + 1,
+                                _400_REPAIR_MAX_ATTEMPTS,
+                                ", ".join(repair_fields),
+                            )
+                            key_r, key_idx_r, _ = self.pool.next_key()
+                            headers_r = self._headers(key_r, extra_headers)
+                            result_r = await self._stream_forward(
+                                method, url, headers_r, repaired_body,
+                                key_idx_r, request_id, t0,
+                            )
+                            if isinstance(result_r, StreamingResponse):
+                                return result_r
+                            result = result_r
+                            if result_r.status_code != 400:
+                                break
                     # Streaming upstream failures normally retry only for
                     # RETRY_STATUSES.
                     if result.status_code in RETRY_STATUSES and attempt < MAX_RETRIES:
@@ -429,6 +503,88 @@ class ProxyCore:
                         )
                         last_status = status
                         continue
+
+                    # --- 400 repair-and-retry: only after upstream HTTP 400,
+                    #     only on attempt 1 (the body was already sent untouched).
+                    #     Repairs operate on a separate copy of the payload.
+                    if status == 400 and attempt == 0:
+                        for repair_step in range(1, _400_REPAIR_MAX_ATTEMPTS):
+                            repair_fields = _400_REPAIR_FIELDS[:repair_step]
+                            repaired_body = _strip_body_fields(body, repair_fields)
+                            if repaired_body is None:
+                                break  # identical payload -> do not resend
+                            log.warning(
+                                "req=%s attempt=%d/%d upstream HTTP 400 — "
+                                "retrying without %s",
+                                request_id,
+                                repair_step + 1,
+                                _400_REPAIR_MAX_ATTEMPTS,
+                                ", ".join(repair_fields),
+                            )
+                            key_r, key_idx_r, _ = self.pool.next_key()
+                            headers_r = self._headers(key_r, extra_headers)
+                            await self.pool.acquire(key_idx_r)
+                            try:
+                                resp_r = await self.client.request(
+                                    method, url, headers=headers_r,
+                                    content=repaired_body,
+                                )
+                                status_r = resp_r.status_code
+                                data_r = resp_r.content
+                                if status_r < 400:
+                                    # Repaired retry succeeded — return normally.
+                                    await self.pool.mark_success(
+                                        key_idx_r,
+                                        (time.perf_counter() - t0) * 1000,
+                                    )
+                                    out_headers_r = {
+                                        k: v
+                                        for k, v in resp_r.headers.items()
+                                        if k.lower()
+                                        not in (
+                                            "transfer-encoding",
+                                            "content-encoding",
+                                            "content-length",
+                                            "connection",
+                                        )
+                                    }
+                                    out_headers_r["x-request-id"] = request_id
+                                    _tr_r = pl.trace(request_id)
+                                    _tr_r.upstream(key_idx_r, status_r)
+                                    try:
+                                        _u = loads(data_r).get("usage") or {}
+                                    except Exception:
+                                        _u = {}
+                                    _tr_r.usage(
+                                        prompt_tokens=_u.get("prompt_tokens"),
+                                        completion_tokens=_u.get("completion_tokens"),
+                                        total_tokens=_u.get("total_tokens"),
+                                    )
+                                    _tr_r.finish(status=status_r)
+                                    log.info(
+                                        "req=%s key_idx=%d status=%d "
+                                        "latency=%.0fms bytes=%d (400-repair)",
+                                        request_id,
+                                        key_idx_r,
+                                        status_r,
+                                        (time.perf_counter() - t0) * 1000,
+                                        len(data_r),
+                                    )
+                                    return Response(
+                                        content=data_r,
+                                        status_code=status_r,
+                                        headers=out_headers_r,
+                                        media_type=resp_r.headers.get(
+                                            "content-type"
+                                        ),
+                                    )
+                                # Still failing — record and try next repair step.
+                                await self.pool.mark_error(key_idx_r, status_r)
+                                status = status_r
+                                data = data_r
+                                resp = resp_r
+                            finally:
+                                await self.pool.release(key_idx_r)
 
                     if status >= 400:
                         await self.pool.mark_error(key_idx, status)
@@ -584,7 +740,6 @@ class ProxyCore:
 
         status = upstream.status_code
         if status in RETRY_STATUSES or status >= 400:
-            await self.pool.mark_error(key_idx, status)
             pl.trace(request_id).upstream(key_idx, status)  # logging-only
             # Log the rejected status explicitly. Without this line a
             # pre-stream upstream rejection (400, 404, ...) produced
@@ -595,6 +750,34 @@ class ProxyCore:
                 request_id, key_idx, status,
             )
             data = await upstream.aread()
+            if not (
+                self.provider == "openrouter"
+                and _is_agentic_harness_gate(status, data)
+            ):
+                await self.pool.mark_error(key_idx, status)
+            try:
+                error_text = data.decode("utf-8", errors="replace")
+                try:
+                    error_json = _json.loads(error_text)
+                    if isinstance(error_json, dict):
+                        for field in (
+                            "api_key", "apiKey", "key", "token",
+                            "access_token", "authorization",
+                        ):
+                            if field in error_json:
+                                error_json[field] = "[REDACTED]"
+                        error_text = _json.dumps(error_json, ensure_ascii=False)
+                except (ValueError, TypeError):
+                    pass
+                log.warning(
+                    "req=%s upstream_error_body status=%d body=%s",
+                    request_id, status, error_text[:1000],
+                )
+            except Exception as e:
+                log.debug(
+                    "req=%s could not log upstream error body: %s",
+                    request_id, e,
+                )
             await upstream.aclose()
             await self.pool.release(key_idx)
             self._free_sem.release()
@@ -669,6 +852,7 @@ class ProxyCore:
             stream_error_reason = ""  # diagnostic: who caused the stream to fail
             saw_content = False
             yielded_any = False
+            error_emitted = False
             is_messages = "/messages" in url
             try:
                 keepalive_interval = float(PROXY_KEEPALIVE_SECONDS) if PROXY_KEEPALIVE_SECONDS else 15.0
@@ -728,14 +912,24 @@ class ProxyCore:
                                 await self.pool.mark_error(key_idx, err_status)
                             except Exception:
                                 pass
-                            # Do NOT yield the raw error frame to the client — it
-                            # confuses Anthropic/OpenAI SDKs (they parse it as a
-                            # valid chunk and then mismatch final usage). Just mark
-                            # the key unhealthy and return; the finally block
-                            # synthesizes message_stop for is_messages streams so
-                            # the Anthropic client doesn't hang in "Thought for…".
-                            # The next request will rotate off this key via
-                            # next_key()'s cooldown skip.
+                            # Surface a normalized error to the downstream
+                            # translator/client. Never turn a failed stream into
+                            # a normal successful completion.
+                            message = "Upstream provider stream failed; retry the turn"
+                            if is_messages:
+                                error_frame = (
+                                    b'event: error\n'
+                                    b'data: {"type":"error","error":{"type":"api_error",'
+                                    b'"message":"Upstream provider stream failed; retry the turn"}}\n\n'
+                                )
+                            else:
+                                error_frame = (
+                                    b'data: {"error":{"type":"upstream_error",'
+                                    b'"message":"Upstream provider stream failed; retry the turn"}}\n\n'
+                                )
+                            yield error_frame
+                            error_emitted = True
+                            yielded_any = True
                             return
 
                         if is_messages and b"message_stop" in frame:
@@ -793,6 +987,7 @@ class ProxyCore:
                     is_messages
                     and saw_content
                     and not saw_message_stop
+                    and not stream_error
                 ):
                     log.warning(
                         "req=%s synthesizing message_stop after incomplete upstream (stream_error=%s reason=%s)",
@@ -812,24 +1007,34 @@ class ProxyCore:
                     except Exception:
                         pass
                 elif is_messages and not saw_message_stop and stream_error:
-                    log.warning(
-                        "req=%s skipping message_stop synthesis (stream_error=True yielded=%s reason=%s)",
-                        request_id,
-                        yielded_any,
-                        stream_error_reason,
-                    )
-                    # If the client never received any content, surface a clean
-                    # Anthropic error so Claude Code does not hang in "Thought for …".
-                    if not yielded_any:
+                    if not error_emitted and stream_error_reason != "client_cancelled":
+                        err = (
+                            b'event: error\n'
+                            b'data: {"type":"error","error":{"type":"api_error",'
+                            b'"message":"Upstream stream failed; retry the turn"}}\n\n'
+                        )
                         try:
-                            err = (
-                                b'event: error\n'
-                                b'data: {"type":"error","error":{"type":"api_error",'
-                                b'"message":"Upstream idle timeout with no content - retry the turn"}}\n\n'
-                            )
                             yield err
+                            error_emitted = True
                         except Exception:
                             pass
+
+                # OpenAI-compatible streams also need an explicit failure frame.
+                if (
+                    not is_messages
+                    and stream_error
+                    and not error_emitted
+                    and stream_error_reason != "client_cancelled"
+                ):
+                    err = (
+                        b'data: {"error":{"type":"upstream_error",'
+                        b'"message":"Upstream stream failed; retry the turn"}}\n\n'
+                    )
+                    try:
+                        yield err
+                        error_emitted = True
+                    except Exception:
+                        pass
 
                 if not stream_error:
                     await _quiet_cleanup(

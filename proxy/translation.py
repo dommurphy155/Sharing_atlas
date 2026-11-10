@@ -1554,46 +1554,62 @@ def _message_tokens(msg: Dict[str, Any]) -> int:
 
 
 def _trim_message_content(msg: Dict[str, Any], max_tokens: int) -> Dict[str, Any]:
-    """Truncate a single message's content to fit within max_tokens.
+    """Trim text conservatively without negative slicing.
 
-    For string content, truncates the text. For list content (Anthropic blocks),
-    truncates the last text block. Returns a new dict.
+    Non-text blocks are retained because dropping images or tool blocks can
+    change request meaning. Consequently, this helper cannot guarantee that
+    a multimodal message fits when non-text blocks alone exceed the budget.
     """
     msg = dict(msg)
+    max_tokens = max(0, int(max_tokens))
     content = msg.get("content")
+
     if isinstance(content, str):
-        # Reserve ~10% for role/other overhead
-        allowed_chars = int(max_tokens * _CHAR_PER_TOKEN * 0.9)
-        if len(content) > allowed_chars:
-            msg["content"] = content[:allowed_chars] + "...[truncated]"
-    elif isinstance(content, list):
-        # Truncate text blocks from the end until under budget
-        remaining = max_tokens
+        allowed_chars = max(0, int(max_tokens * _CHAR_PER_TOKEN * 0.9))
+        if _estimate_tokens(content) > max_tokens:
+            msg["content"] = (
+                content[:allowed_chars] + "...[truncated]"
+                if allowed_chars > 0 else ""
+            )
+        return msg
+
+    if isinstance(content, list):
+        # Reserve budget for non-text blocks first. These blocks are preserved,
+        # even if their estimated cost exceeds the available budget.
+        non_text_cost = sum(
+            _message_tokens({"content": [block]})
+            for block in content
+            if not (isinstance(block, dict) and block.get("type") == "text")
+        )
+        remaining = max(0, max_tokens - non_text_cost)
         new_blocks = []
+
+        # Preserve the latest text first, matching the previous trimming intent.
         for block in reversed(content):
-            if not isinstance(block, dict):
+            if not isinstance(block, dict) or block.get("type") != "text":
                 new_blocks.append(block)
                 continue
-            bt = block.get("type")
-            if bt == "text":
-                ttokens = _estimate_tokens(block.get("text", ""))
-                if ttokens > remaining:
-                    allowed_chars = int(remaining * _CHAR_PER_TOKEN * 0.9)
-                    block = {"type": "text", "text": block.get("text", "")[:allowed_chars] + "...[truncated]"}
-                    new_blocks.append(block)
-                    remaining = 0
-                else:
-                    new_blocks.append(block)
-                    remaining -= ttokens
-            else:
-                # Keep non-text blocks (images, tool_use) — expensive but usually few
-                ttokens = _message_tokens({"content": [block]})
-                remaining -= ttokens
+
+            text = block.get("text", "")
+            cost = _estimate_tokens(text)
+            if cost <= remaining:
                 new_blocks.append(block)
+                remaining -= cost
+            elif remaining > 0:
+                allowed_chars = max(
+                    0, int(remaining * _CHAR_PER_TOKEN * 0.9)
+                )
+                if allowed_chars > 0:
+                    new_blocks.append({
+                        **block,
+                        "text": text[:allowed_chars] + "...[truncated]",
+                    })
+                remaining = 0
+            # If no budget remains, omit this text block rather than using a
+            # negative slice or adding more text to an already-full message.
+
         msg["content"] = list(reversed(new_blocks))
-        if remaining < 0:
-            # Still over — we did our best with text truncation
-            pass
+
     return msg
 
 
@@ -1635,21 +1651,17 @@ def _trim_messages(messages: List[Dict], max_tokens: int) -> List[Dict]:
                 for m in trimmable
             ]
 
-    # Rebuild: protected messages stay in their original relative positions
-    # but trimmable ones that remain are appended after. This is a best-effort
-    # reordering — Anthropic/OpenRouter accept system at any position.
-    result = []
-    remaining = list(trimmable)
-    for m in messages:
-        if not isinstance(m, dict):
-            continue
-        role = m.get("role", "")
-        if role in ("system", "developer"):
-            result.append(m)
-            if m in remaining:
-                remaining.remove(m)
-    result.extend(remaining)
-    return result
+    # Retain the original order and remove only messages that were trimmed.
+    # Object identity avoids accidentally retaining a removed duplicate message.
+    kept_ids = {id(m) for m in trimmable}
+    return [
+        m for m in messages
+        if isinstance(m, dict)
+        and (
+            m.get("role", "") in ("system", "developer")
+            or id(m) in kept_ids
+        )
+    ]
 
 
 def _strip_internal_from_messages(messages: List[Dict]) -> List[Dict]:
