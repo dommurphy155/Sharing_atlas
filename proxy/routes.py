@@ -709,6 +709,7 @@ async def responses_api(request: Request) -> Response:
         started_item = False
         buf = b""
         tool_call_state = {}
+        emitted_any = False
 
         yield _sse_event("response.created", {
             "type": "response.created",
@@ -807,6 +808,7 @@ async def responses_api(request: Request) -> Response:
 
                         if not state.get("added"):
                             state["added"] = True
+                            emitted_any = True
                             item = _atlas_tool_call_item(
                                 state,
                                 status="in_progress",
@@ -852,6 +854,7 @@ async def responses_api(request: Request) -> Response:
                         })
                         started_item = True
 
+                    emitted_any = True
                     text_so_far.append(content)
                     yield _sse_event("response.output_text.delta", {
                         "type": "response.output_text.delta",
@@ -862,6 +865,26 @@ async def responses_api(request: Request) -> Response:
                     })
 
         full_text = "".join(text_so_far)
+
+        if not emitted_any:
+            # Upstream produced zero visible output. Surface an explicit
+            # failure instead of a clean empty completion — an empty turn
+            # makes the client synthesize a "no visible output" nudge,
+            # which then loops through every later turn.
+            yield _sse_event("response.failed", {
+                "type": "response.failed",
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "status": "failed",
+                    "model": model_name,
+                    "error": {
+                        "type": "server_error",
+                        "message": "Upstream produced no output; retry the turn",
+                    },
+                },
+            })
+            return
 
         for idx, tc in tool_call_state.items():
             if tc.get("custom_kind") in _CUSTOM_TOOL_TYPES:
@@ -1158,6 +1181,7 @@ async def _stream_openai_to_anthropic(rid: str, upstream_url: str, payload: byte
             "thinking_started": False,
             "tool_blocks": {},
         }
+        emitted_any = False
 
         # Stream from upstream (proxy.iter_upstream_sse or proxy.forward already returned a StreamingResponse)
         async for raw in resp.body_iterator:
@@ -1214,7 +1238,34 @@ async def _stream_openai_to_anthropic(rid: str, upstream_url: str, payload: byte
             ):
                 if evt_data is None:
                     continue
+                # Only real output counts as visible content. Scaffolding
+                # (message_delta with just a stop_reason) does not. Any
+                # delta qualifies; a thinking/tool_use block start means the
+                # model is producing output, not nothing.
+                if evt_name == "content_block_delta":
+                    emitted_any = True
+                elif evt_name == "content_block_start":
+                    block_type = (
+                        (evt_data or {}).get("content_block") or {}
+                    ).get("type", "")
+                    if block_type in ("thinking", "tool_use", "redacted_thinking"):
+                        emitted_any = True
                 yield _sse_event(evt_name, evt_data)
+
+        if not emitted_any:
+            # Upstream produced zero visible output. Surface an explicit
+            # error instead of a clean empty turn — an empty successful
+            # assistant message makes the client synthesize a
+            # "your previous response had no visible output" nudge,
+            # which then loops through every later turn.
+            yield _sse_event("error", {
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": "Upstream produced no output; retry the turn",
+                },
+            })
+            return
 
         # Close events
         yield _sse_event("content_block_stop", {
