@@ -11,7 +11,7 @@ Strategy:
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from .config import SYSTEM_PROMPT_OVERRIDE, SYSTEM_PROMPT_OVERRIDE_ENABLED, SYSTEM_PROMPT_REINFORCEMENT_ENABLED, SYSTEM_PROMPT_STRIP_HARNESS
+from .config import SYSTEM_PROMPT_OVERRIDE, SYSTEM_PROMPT_REINFORCEMENT_ENABLED, SYSTEM_PROMPT_STRIP_HARNESS
 
 
 # Compact reinforcement message for recency primacy
@@ -63,10 +63,8 @@ def _inject_system_override_openai(messages: List[Dict]) -> List[Dict]:
     Additive strategy: prepend override as first system message, keep all
     existing system content. Strip developer-role messages (harness refusal
     layer) to prevent them from overriding the Atlas override.
-
-    Identity passthrough when SYSTEM_PROMPT_OVERRIDE_ENABLED is false.
     """
-    if not SYSTEM_PROMPT_OVERRIDE_ENABLED or not SYSTEM_PROMPT_OVERRIDE:
+    if not SYSTEM_PROMPT_OVERRIDE:
         return messages
 
     # Strip developer-role messages (harness safety/refusal persona)
@@ -99,10 +97,8 @@ def _inject_system_override_anthropic(
     layer) to prevent them from overriding the Atlas override.
 
     Returns (new_messages, new_system_as_block_list).
-
-    Identity passthrough when SYSTEM_PROMPT_OVERRIDE_ENABLED is false.
     """
-    if not SYSTEM_PROMPT_OVERRIDE_ENABLED or not SYSTEM_PROMPT_OVERRIDE:
+    if not SYSTEM_PROMPT_OVERRIDE:
         return messages, _normalize_system(system)
 
     # Normalize incoming system to block list, preserving cache_control

@@ -182,8 +182,6 @@ async def _reload_keys_periodically(pool: KeyPool) -> None:
     successive writes, preserved mtimes, or partial writes that happen
     to share a timestamp cannot leave the pool stale.
     """
-    from proxy.config import SYSTEM_PROMPT_OVERRIDE_ENABLED
-
     last_override_mtime = 0
     last_key_fingerprint: Optional[tuple] = None  # (file_path, tuple_of_keys)
 
@@ -192,7 +190,7 @@ async def _reload_keys_periodically(pool: KeyPool) -> None:
             await asyncio.sleep(5)  # Check every 5 seconds
 
             override_file = Path(SYSTEM_PROMPT_OVERRIDE_FILE)
-            if SYSTEM_PROMPT_OVERRIDE_ENABLED and override_file.exists():
+            if override_file.exists():
                 omtime = override_file.stat().st_mtime
                 if omtime > last_override_mtime:
                     last_override_mtime = omtime
