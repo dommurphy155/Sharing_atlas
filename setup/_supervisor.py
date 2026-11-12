@@ -156,7 +156,6 @@ def _persist_posix_path(bin_dir: Path) -> None:
 
 def make_windows_shim(repo, bin_dir):
     import os
-    import winreg
 
     python = Path(core.venv_python(repo))
     target = repo / "atlas" / "bin" / "atlas"
@@ -195,7 +194,27 @@ def make_windows_shim(repo, bin_dir):
     except OSError:
         pass
 
-    # --- Register bin_dir in the User PATH via the registry ---
+    # --- Register bin_dir in the User PATH ---
+    # Two writers touch this: PowerShell's [Environment]::SetEnvironmentVariable
+    # (used by install.ps1) and the winreg call below. Both target the same
+    # HKCU\Environment value, so normalise the compare the same way each time:
+    # expand env vars, casefold, strip trailing backslashes.
+    def _norm(entry: str) -> str:
+        return os.path.normcase(
+            os.path.normpath(os.path.expandvars(entry.strip().strip('"')))
+        ).rstrip("\\")
+
+    try:
+        import winreg
+    except ImportError:
+        # Non-Windows-native interpreter (e.g. MSYS2/MinGW). Shims are on disk;
+        # report the exact PATH edit instead of claiming a registration happened.
+        return True, (
+            f"Installed {cmd_shim} + {posix_shim}. This Python has no 'winreg' "
+            f"module, so the user PATH was not updated. Add {bin_dir} to your "
+            "user PATH to run 'atlas' from any shell."
+        )
+
     try:
         with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER, "Environment", 0,
@@ -206,15 +225,16 @@ def make_windows_shim(repo, bin_dir):
             except FileNotFoundError:
                 user_path, value_type = "", winreg.REG_EXPAND_SZ
 
-            entries = [x.strip().strip('"') for x in user_path.split(";") if x.strip()]
-            norm = os.path.normcase(os.path.normpath(str(bin_dir)))
-            if not any(
-                os.path.normcase(os.path.normpath(os.path.expandvars(x))) == norm
-                for x in entries
-            ):
-                entries.append(str(bin_dir))
-                winreg.SetValueEx(key, "Path", 0, value_type, ";".join(entries))
+            entries = [x.strip() for x in user_path.split(";") if x.strip()]
+            target_norm = _norm(str(bin_dir))
+            if any(_norm(x) == target_norm for x in entries):
+                return True, (
+                    f"Installed {cmd_shim} + {posix_shim}; {bin_dir} already on "
+                    "the user PATH."
+                )
 
+            entries.append(str(bin_dir))
+            winreg.SetValueEx(key, "Path", 0, value_type, ";".join(entries))
             _broadcast_env_change()
 
         return True, f"Installed {cmd_shim} + {posix_shim} and registered {bin_dir} in user PATH."

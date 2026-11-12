@@ -214,15 +214,73 @@ def http_health(url: str) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
+def _install_precheck() -> tuple[bool, str]:
+    """Decide whether a full installer run is actually needed.
+
+    The installer's expensive steps are venv/deps, key collection, proxy
+    start, and the CLI shim. When all of those are already done there is
+    nothing to add, and re-running would needlessly re-prompt for keys. This
+    reports what is missing so cmd_install can either skip or hand off.
+
+    Returns (needs_full_install, summary).
+    """
+    problems: list[str] = []
+
+    if not VENV_PY.exists():
+        problems.append("virtualenv missing")
+    else:
+        r = _run([str(VENV_PY), "-c",
+                  "import fastapi, uvicorn, httpx, orjson"],
+                 check=False, capture=True)
+        if r.returncode != 0:
+            problems.append("dependencies missing")
+
+    if not (DATA_DIR / "openrouter_data" / "openroute_keys.txt").is_file():
+        problems.append("no key file")
+    else:
+        n = sum(1 for ln in (DATA_DIR / "openrouter_data" / "openroute_keys.txt")
+                .read_text(encoding="utf-8", errors="replace").splitlines()
+                if ln.strip() and not ln.startswith("#"))
+        if n == 0:
+            problems.append("key file is empty")
+
+    rt = _current_runtime()
+    running, _ = rt.status()
+    if not running:
+        problems.append("proxy not running")
+
+    # The CLI shim is the step the user actually interacts with, so a broken
+    # one alone is enough to justify re-running the installer.
+    if not shutil.which("atlas"):
+        problems.append("'atlas' not on PATH")
+
+    if not problems:
+        return False, "everything already installed"
+    return True, "; ".join(problems)
+
+
 def cmd_install(args) -> int:
     """Atlas proxy + coding-harness setup wizard.
 
     Drives: venv/deps -> CLI shim -> auto-start -> provider selection -> key
     import via the OS-native installer bootstrap (install.sh / install.ps1).
+
+    When every step is already satisfied this skips the installer entirely
+    rather than making the user re-enter keys for an install that is done.
     """
     dry_run = getattr(args, "dry_run", False)
     if dry_run:
         CONSOLE.print(yellow("  DRY-RUN — no changes will be made"))
+
+    needs_install, summary = _install_precheck()
+    if not needs_install:
+        section("Atlas proxy — install")
+        CONSOLE.print(green(f"  ✔ Already installed ({summary})."))
+        CONSOLE.print(dim("  Nothing to do. Use 'atlas status' to confirm, "
+                          "'atlas uninstall' to remove."))
+        return 0
+
+    CONSOLE.print(dim(f"  Installer needed: {summary}"))
     cmd = _installer_cmd("install", dry_run)
     if not cmd:
         return 1

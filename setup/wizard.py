@@ -179,7 +179,9 @@ def _start_and_verify(repo: Path, venv_py: Path, expected_keys: int
 
 
 def _show_summary(repo: Path, added: int, total: int,
-                  started_ok: bool, message: str) -> None:
+                  started_ok: bool, message: str,
+                  shim_ok: bool | None = None,
+                  shim_msg: str = "") -> None:
     tbl = Table(show_header=True, header_style="bold cyan",
                 box=None, padding=(0, 1))
     tbl.add_column("Step", style="bold")
@@ -205,12 +207,22 @@ def _show_summary(repo: Path, added: int, total: int,
         started_style,
         f"{total} OpenRouter key(s)" if started_ok else "not verified",
     )
+    # Report the CLI's real state. 'skipped' means the user declined; a
+    # failure is a failure even when the proxy is healthy.
+    if shim_ok is None:
+        cli_style, cli_detail = "[yellow]—[/yellow]", shim_msg or "skipped"
+    elif shim_ok:
+        cli_style, cli_detail = "[green]✓[/green]", shim_msg
+    else:
+        cli_style, cli_detail = "[red]✘[/red]", shim_msg
+    tbl.add_row("CLI (`atlas`)", cli_style, cli_detail)
 
     CONSOLE.print()
     CONSOLE.print(tbl)
 
 
-def _show_exit(repo: Path, started_ok: bool) -> None:
+def _show_exit(repo: Path, started_ok: bool,
+               shim_ok: bool | None = None) -> None:
     port = core.proxy_port(repo)
     if started_ok:
         CONSOLE.print(f"\n[green]✓ Setup complete![/green]")
@@ -219,13 +231,22 @@ def _show_exit(repo: Path, started_ok: bool) -> None:
         )
         CONSOLE.print(f"  Log file: {core.log_file(repo)}")
         CONSOLE.print(f"  PID file: {core.pid_file(repo)}")
-        CONSOLE.print("\n  To stop the proxy:")
-        if core.is_windows():
-            CONSOLE.print("    atlas stop")
+        if shim_ok:
+            CONSOLE.print("\n  To stop the proxy:")
+            if core.is_windows():
+                CONSOLE.print("    atlas stop")
+            else:
+                CONSOLE.print(f"    kill $(cat {core.pid_file(repo)})")
+            CONSOLE.print("\n  To manage it later, run:  atlas status | atlas stop | atlas start")
         else:
-            CONSOLE.print(f"    kill $(cat {core.pid_file(repo)})")
-        CONSOLE.print("\n  To manage it later, run:  atlas status | atlas stop | atlas start")
-        CONSOLE.print("  (if you installed the CLI shim during setup).")
+            # Don't advertise a command that isn't on PATH.
+            CONSOLE.print("\n  To stop the proxy:")
+            if core.is_windows():
+                CONSOLE.print(f"    taskkill /PID <pid> /T /F   (pid in {core.pid_file(repo)})")
+            else:
+                CONSOLE.print(f"    kill $(cat {core.pid_file(repo)})")
+            CONSOLE.print(f"\n  CLI not on PATH — invoke it directly:")
+            CONSOLE.print(f"    {core.venv_python(repo)} {repo / 'atlas' / 'bin' / 'atlas'} status")
     else:
         CONSOLE.print(f"\n[red]✗ Setup failed.[/red]")
         log = core.log_file(repo)
@@ -268,17 +289,30 @@ def run_wizard(repo: Path, venv_py: Path) -> int:
     # ---- Step 5: Optional CLI shim ----
     CONSOLE.print("\n[cyan]Optional: install `atlas` CLI?[/cyan]")
     CONSOLE.print("  This lets you run `atlas status`, `atlas stop`, `atlas start` later.")
+    shim_ok: bool | None = None
+    shim_msg = "skipped"
     if core.is_windows() or Confirm.ask("Install CLI shim?", default=True):
         shim_ok, shim_msg = _install_cli_shim(repo, osmod)
         shim_style = "[green]✓[/green]" if shim_ok else "[red]✘[/red]"
         CONSOLE.print(f"  {shim_style} {shim_msg}")
-        if core.is_windows() and not shim_ok:
-            CONSOLE.print("[red]Windows CLI installation failed; setup cannot be marked successful.[/red]")
-            return 1
+        # A failed CLI registration is not a failed proxy install. The proxy is
+        # already up and verified; report the shim state and let the user decide
+        # whether to fix PATH or use the venv python directly.
+        if not shim_ok:
+            CONSOLE.print("[yellow]The Atlas proxy is running; only the 'atlas' "
+                          "convenience command is unavailable.[/yellow]")
+            CONSOLE.print(f"[dim]  Invoke the CLI directly: "
+                          f"{core.venv_python(repo)} {repo / 'atlas' / 'bin' / 'atlas'}[/dim]")
+            if core.is_windows():
+                CONSOLE.print(f"[dim]  Or add {Path.home() / '.local' / 'bin'} to your "
+                              f"user PATH, then open a new shell.[/dim]")
+    else:
+        CONSOLE.print("[dim]  Skipped; proxy management still works via the runtime "
+                      "and the venv python.[/dim]")
 
     # ---- Step 6: Summary + exit ----
-    _show_summary(repo, added, total, True, message)
-    _show_exit(repo, True)
+    _show_summary(repo, added, total, True, message, shim_ok, shim_msg)
+    _show_exit(repo, True, shim_ok)
 
     return 0
 

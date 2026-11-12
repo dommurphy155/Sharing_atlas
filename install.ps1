@@ -335,7 +335,21 @@ if (-not (($env:Path -split ";" | Where-Object {
 if (-not (Get-Command atlas -ErrorAction SilentlyContinue)) {
     Stop-Installer "Atlas launcher exists but 'atlas' cannot be resolved from PATH." 1
 }
-Write-Host "-> Atlas CLI verified: $AtlasShim"
+
+# Verify the launcher actually runs, not just that it resolves. A shim that
+# cannot execute its interpreter is worth surfacing now rather than leaving the
+# user with a confusing "python: can't open file" later. This is a warning, not
+# a failure: the proxy is already up and healthy, and a broken convenience
+# command must not fail an otherwise working install.
+& $AtlasShim --version *> $null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "WARN: Atlas launcher at $AtlasShim resolved but failed to run (exit code: $LASTEXITCODE)." -ForegroundColor Yellow
+    Write-Host "      The proxy is running; only the 'atlas' shortcut is affected." -ForegroundColor Yellow
+    Write-Host "      Invoke the CLI directly: `"$VenvPython`" `"$RepoRoot\atlas\bin\atlas`" --help" -ForegroundColor Yellow
+}
+else {
+    Write-Host "-> Atlas CLI verified: $AtlasShim (runnable, version check passed)"
+}
 
 Write-Host "-> installer finished successfully"
 exit 0
