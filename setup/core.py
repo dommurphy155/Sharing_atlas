@@ -28,7 +28,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 KEY_FILE_NAME = "data/openrouter_data/openroute_keys.txt"
 RUNTIME_PROVIDER_FILE = "data/proxy_data/runtime_provider.json"
-DEFAULT_PORT = 8777  # proxy.config.LISTEN_PORT default (this fork)
+DEFAULT_PORT = 8000  # proxy.config.LISTEN_PORT default (this fork)
 HEALTH_PATH = "/health"
 
 SERVICE_NAME = "atlas-proxy.service"
@@ -207,7 +207,7 @@ def key_prefix_ok(key: str) -> bool:
 def proxy_port(repo: Path) -> int:
     """Resolve the port the proxy will bind to.
 
-    Priority: LISTEN_PORT env -> proxy.config.LISTEN_PORT -> 8777.
+    Priority: LISTEN_PORT env -> proxy.config.LISTEN_PORT -> 8000.
     """
     envp = os.environ.get("LISTEN_PORT")
     if envp and envp.isdigit():

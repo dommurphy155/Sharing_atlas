@@ -26,3 +26,6 @@ __pycache__/
 .installer.log
 
 .windows-installer-backup-*/
+.backup_sudo_free/
+.plugin-config/
+.session-summary.md

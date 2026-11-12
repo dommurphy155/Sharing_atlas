@@ -9,19 +9,19 @@ The runtime is selected at install time and persisted to
 time. Re-running `atlas install` re-detects and re-selects.
 
 Selection priority (highest first):
-  1. systemd system  — Linux + root OR sudo works + systemctl + systemd PID 1
-  2. systemd --user  — Linux + XDG_RUNTIME_DIR + systemctl --user + loginctl
+  1. systemd --user  — Linux + XDG_RUNTIME_DIR + systemctl --user + loginctl
                         session for current user
-  3. tmux-equivalent — any of: tmux, psmux, tmuxw, lumux, qscn, wmux
-  4. nohup          — POSIX nohup (always available on unix) — last
+  2. tmux-equivalent — any of: tmux, psmux, tmuxw, lumux, qscn, wmux
+  3. nohup          — POSIX nohup (always available on unix) — last
                        mechanical fallback. Foreground `atlas start` and
                        detached `nohup` are not equivalent: nohup survives
                        terminal close; `atlas start` foreground blocks.
-  5. manual         — Windows without a tmux-equivalent. User runs the
+  4. manual         — Windows without a tmux-equivalent. User runs the
                        proxy as a foreground process from their shell.
 
-The "systemd system" mode is always preferred when actually usable. The
-fallbacks only kick in when root / sudo / systemd genuinely are unavailable.
+Atlas is sudo-free: the system-level systemd unit (which requires sudo) is
+never selected. The fallbacks only kick in when systemd --user / tmux / nohup
+are unavailable.
 """
 
 from __future__ import annotations
@@ -71,12 +71,10 @@ class RuntimeEnv:
     # Convenience derivations
     @property
     def systemd_system_usable(self) -> bool:
-        return (
-            self.os == "linux"
-            and self.has_systemctl
-            and self.systemd_pid1
-            and (self.is_root or self.sudo_works)
-        )
+        # Atlas is sudo-free: the system-level systemd unit (which lives in
+        # /etc/systemd/system and requires sudo to install/remove) is never
+        # selected. Prefer the per-user systemd runtime instead.
+        return False
 
     @property
     def systemd_user_usable(self) -> bool:
@@ -166,12 +164,9 @@ def detect_env() -> RuntimeEnv:
         r = _run_quiet(["net", "session"], timeout=2.0)
         is_root = bool(r and r.returncode == 0)
 
-    # sudo -n true: succeeds (rc=0) iff sudo exists AND is allowed without
-    # a password. If it would prompt for a password, we treat sudo as
-    # non-functional for our purposes — better to fall back than hang.
-    # Having sudo installed is enough to make systemd a viable runtime
-    # candidate.  Privileged operations intentionally invoke normal sudo so
-    # the user can authenticate interactively when required.
+    # sudo_works is kept for backwards compatibility with persisted runtime
+    # state (data/runtime.json) but is no longer used to select a runtime.
+    # Atlas is sudo-free: the system-level systemd unit is never selected.
     sudo_works = bool(shutil.which("sudo"))
 
     has_systemctl = shutil.which("systemctl") is not None
@@ -229,16 +224,13 @@ def choose_mode(env: RuntimeEnv) -> RuntimeMode:
     """Pick the best runtime mode for the given environment.
 
     Order of preference (highest first):
-      1. systemd         — full system service, root or sudo
-      2. systemd-user    — user-scoped systemd service
-      3. launchd         — macOS native (auto-start at login, survives reboot)
-      4. tmux            — detached user tmux session
-      5. nohup           — POSIX nohup, last mechanical fallback
-      6. scheduled-task  — Windows Task Scheduler (auto-start at log-on)
-      7. manual          — no supervisor available; user runs it themselves
+      1. systemd-user    — user-scoped systemd service (no sudo)
+      2. launchd         — macOS native (auto-start at login, survives reboot)
+      3. tmux            — detached user tmux session
+      4. nohup           — POSIX nohup, last mechanical fallback
+      5. scheduled-task  — Windows Task Scheduler (auto-start at log-on)
+      6. manual          — no supervisor available; user runs it themselves
     """
-    if env.systemd_system_usable:
-        return "systemd"
     if env.systemd_user_usable:
         return "systemd-user"
     if env.launchd_usable:
@@ -1299,10 +1291,10 @@ def install_runtime(repo_root: Path, venv_py: Path,
 # Health endpoint + bounded polling window. A few seconds is plenty for
 # uvicorn to bind; we don't want the installer sitting around for minutes.
 #
-# NOTE: the fork's default LISTEN_PORT is 8777 (prod lives on 8788).
+# NOTE: the fork's default LISTEN_PORT is 8000 (prod lives on 8000).
 # We prefer reading it from proxy.config so we always check the right port;
 # a hard-coded constant is only used as a last-resort fallback.
-HEALTH_PORT_DEFAULT = 8777
+HEALTH_PORT_DEFAULT = 8000
 HEALTH_TIMEOUT_S = 6.0
 HEALTH_POLL_S = 0.25
 
@@ -1313,8 +1305,8 @@ def _health_url(repo_root: Path) -> str:
     Priority:
       1. ``data/bound_port`` — written by the running proxy with the port
          it actually bound to. Honors port-collision fallback at runtime.
-      2. ``proxy.config.LISTEN_PORT`` — the configured default (fork: 8777,
-         NOT prod's 8788).
+      2. ``proxy.config.LISTEN_PORT`` — the configured default (fork: 8000,
+         NOT prod's 8000).
       3. The fork's compiled-in default.
     """
     port: int | None = None
@@ -1377,7 +1369,7 @@ def check_health(timeout_s: float = HEALTH_TIMEOUT_S,
 def _candidate_modes(env: RuntimeEnv) -> list[RuntimeMode]:
     """Build the ordered list of runtime candidates for this environment.
 
-    Linux:  systemd-system -> systemd-user -> tmux -> nohup
+    Linux:  systemd-user -> tmux -> nohup
     macOS:  launchd -> tmux -> nohup
     Windows: detached process -> manual
     Other:  tmux -> nohup
@@ -1385,8 +1377,6 @@ def _candidate_modes(env: RuntimeEnv) -> list[RuntimeMode]:
     """
     if env.os == "linux":
         candidates: list[RuntimeMode] = []
-        if env.systemd_system_usable:
-            candidates.append("systemd")
         if env.systemd_user_usable:
             candidates.append("systemd-user")
         if env.tmux_usable:
@@ -1477,8 +1467,6 @@ def get_runtime(repo_root: Path, venv_py: Path, service_name: str) -> Runtime:
 
 def _mode_usable(mode: RuntimeMode, env: RuntimeEnv) -> bool:
     """Is this mode actually usable on the current host right now?"""
-    if mode == "systemd":
-        return env.systemd_system_usable
     if mode == "systemd-user":
         return env.systemd_user_usable
     if mode == "tmux":
