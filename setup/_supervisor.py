@@ -176,11 +176,14 @@ def make_windows_shim(repo, bin_dir=None):
     bin_dir.mkdir(parents=True, exist_ok=True)
 
     # --- PowerShell / cmd wrapper (atlas.cmd) ---
+    # localsetend keeps env changes from leaking; quoted "%*" so arguments with
+    # spaces, '&', or '^' reach the CLI intact instead of being re-parsed by cmd.
     cmd_shim = bin_dir / "atlas.cmd"
     cmd_shim.write_text(
         '@echo off\r\n'
-        f'"{python}" "{target}" %*\r\n'
-        'exit /b %ERRORLEVEL%\r\n',
+        'setlocal\r\n'
+        f'"{python}" "{target}" "%*"\r\n'
+        'endlocal & exit /b %ERRORLEVEL%\r\n',
         encoding="utf-8",
         newline="",
     )

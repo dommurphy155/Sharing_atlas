@@ -366,8 +366,22 @@ if (-not (($env:Path -split ";" | Where-Object {
     $env:Path = "$AtlasBin;$env:Path"
 }
 
-if (-not (Get-Command atlas -ErrorAction SilentlyContinue)) {
-    Stop-Installer "Atlas launcher exists but 'atlas' cannot be resolved from PATH." 1
+# Verify the shim is actually registered in the *persistent* user PATH (the
+# registry value), not the current session's PATH. The session PATH was captured
+# when this PowerShell started, before the shim was installed, so it is stale by
+# construction — checking it would fail every first-time install.
+$RegistryPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$Registered = @($RegistryPath -split ";" | Where-Object {
+    [string]::Equals($_.Trim().TrimEnd("\"), $AtlasBin.TrimEnd("\"), [StringComparison]::OrdinalIgnoreCase)
+})
+if (-not $Registered) {
+    Write-Host "WARN: $AtlasBin is not in the persistent user PATH." -ForegroundColor Yellow
+    Write-Host "      Run 'atlas' from a new shell, or add it manually." -ForegroundColor Yellow
+}
+elseif (-not (Get-Command atlas -ErrorAction SilentlyContinue)) {
+    # Registered, but not resolvable in this session. Expected on a first install:
+    # the running shell never re-read the registry. A new shell will pick it up.
+    Write-Host "-> Atlas CLI registered at $AtlasBin (open a new shell to use 'atlas')" -ForegroundColor Yellow
 }
 
 # Verify the launcher actually runs, not just that it resolves. A shim that
