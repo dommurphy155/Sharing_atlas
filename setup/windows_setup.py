@@ -26,6 +26,5 @@ __all__ = [
 
 
 def install_cli_shim(repo: Path) -> tuple[bool, str]:
-    """Install the Atlas CLI wrapper in the user's local bin directory."""
-    bin_dir = Path.home() / ".local" / "bin"
-    return make_windows_shim(repo, bin_dir)
+    """Install the Atlas CLI wrapper in the current user's local bin directory."""
+    return make_windows_shim(repo)

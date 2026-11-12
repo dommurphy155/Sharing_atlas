@@ -154,18 +154,25 @@ def _persist_posix_path(bin_dir: Path) -> None:
             pass  # best-effort
 
 
-def make_windows_shim(repo, bin_dir):
-    import os
+def make_windows_shim(repo, bin_dir=None):
+    """Install ``atlas.cmd`` + a POSIX wrapper and register the dir on the
+    *current user's* PATH.
 
+    ``bin_dir`` is accepted for backwards compatibility but is ignored: the
+    shim location must be derived from USERPROFILE here, because callers
+    (install.ps1, PowerShell's ``$HOME``) resolve it differently from
+    ``Path.home()`` on domain/redirected-profile machines.
+    """
     python = Path(core.venv_python(repo))
     target = repo / "atlas" / "bin" / "atlas"
-    bin_dir = Path(bin_dir).expanduser()
 
     if not python.is_file():
         return False, f"Virtualenv Python not found: {python}"
     if not target.is_file():
         return False, f"Atlas CLI not found: {target}"
 
+    home = Path(os.environ.get("USERPROFILE") or os.path.expanduser("~"))
+    bin_dir = home / ".local" / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
 
     # --- PowerShell / cmd wrapper (atlas.cmd) ---

@@ -192,6 +192,21 @@ if ($PythonVersion -lt [version]"3.10") {
 Write-Host "-> Python $PythonVersion"
 Write-Host "-> Repository: $RepoRoot"
 
+# ---- Home-directory sanity check
+# The atlas shim lives under the current user's profile. If PowerShell's $HOME
+# and %USERPROFILE% disagree, the installer would otherwise write the shim to
+# one place and look for it in another. Surface the mismatch instead of failing
+# later with a confusing "launcher was not created".
+$ProfileMismatch = -not [string]::Equals(
+    ($HOME | ForEach-Object { $_.TrimEnd("\") }),
+    ($env:USERPROFILE | ForEach-Object { $_.TrimEnd("\") }),
+    [StringComparison]::OrdinalIgnoreCase
+)
+if ($ProfileMismatch) {
+    Write-Host "-> home directories differ: `$HOME='$HOME' USERPROFILE='$env:USERPROFILE'" -ForegroundColor Yellow
+    Write-Host "   the atlas shim will be installed under %USERPROFILE%" -ForegroundColor Yellow
+}
+
 if (-not (Test-Path $Requirements -PathType Leaf)) {
     Stop-Installer "requirements.txt not found: $Requirements" 1
 }
@@ -312,9 +327,28 @@ if ($WizardExitCode -ne 0) {
 }
 
 # ---- Refresh and verify the Atlas CLI in this PowerShell session
-$AtlasShim = Join-Path $HOME ".local\bin\atlas.cmd"
+# The shim is written under the *current user's* profile. $HOME can diverge from
+# %USERPROFILE% (domain profiles, OneDrive-redirected folders, Git Bash), so
+# resolve both and prefer whichever actually holds the launcher.
+$AtlasBin = $null
+foreach ($HomeDir in @($HOME, $env:USERPROFILE) | Select-Object -Unique) {
+    if (-not $HomeDir) { continue }
+    $CandidateBin = Join-Path $HomeDir ".local\bin"
+    if (Test-Path (Join-Path $CandidateBin "atlas.cmd") -PathType Leaf) {
+        $AtlasBin = $CandidateBin
+        break
+    }
+}
+if (-not $AtlasBin) {
+    $AtlasBin = Join-Path $env:USERPROFILE ".local\bin"
+}
+$AtlasShim = Join-Path $AtlasBin "atlas.cmd"
 if (-not (Test-Path $AtlasShim -PathType Leaf)) {
-    Stop-Installer "Atlas CLI launcher was not created: $AtlasShim" 1
+    $Tried = (@($HOME, $env:USERPROFILE) | Select-Object -Unique | ForEach-Object { Join-Path $_ ".local\bin\atlas.cmd" }) -join ", "
+    Stop-Installer "Atlas CLI launcher was not created. Looked for: $Tried" 1
+}
+if ($ProfileMismatch) {
+    Write-Host "-> using launcher at $AtlasShim (`$HOME and USERPROFILE differ)" -ForegroundColor Yellow
 }
 
 $AtlasBin = Split-Path $AtlasShim -Parent
