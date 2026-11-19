@@ -12,7 +12,11 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from .utils import loads
-from .system_prompt import _inject_system_override_openai, _inject_system_override_anthropic
+from .system_prompt import (
+    _inject_system_override_openai,
+    _inject_system_override_anthropic,
+    detect_harness,
+)
 from .config import get_logger, PROVIDER, REASONING_MODE
 
 log = get_logger(__name__)
@@ -1001,7 +1005,7 @@ def anthropic_messages_to_openai(
 
             # Images produced by tools are exposed as actual multimodal model
             # input. This is the provider-neutral OpenAI-compatible form used
-            # by OpenRouter, NVIDIA NIM, Together, etc.
+            # by OpenRouter, Hugging Face, NVIDIA NIM, Together, etc.
             if tool_image_parts:
                 tool_image_msg: Dict[str, Any] = {
                     "role": "user",
@@ -1612,7 +1616,6 @@ def _trim_message_content(msg: Dict[str, Any], max_tokens: int) -> Dict[str, Any
 
     return msg
 
-
 def _trim_messages(messages: List[Dict], max_tokens: int) -> List[Dict]:
     """Trim oldest user/assistant/tool messages when total tokens exceed max.
 
@@ -1805,7 +1808,10 @@ def _apply_max_tokens_alias(body: Dict[str, Any], *, prefer_completion: bool = F
 # ---------------------------------------------------------------------------
 
 def prepare_chat_body(
-    body: Dict[str, Any], reasoning_mode: Optional[str] = None
+    body: Dict[str, Any],
+    reasoning_mode: Optional[str] = None,
+    *,
+    harness=None,
 ) -> Dict[str, Any]:
     """Normalize an incoming chat/completions body for OpenRouter.
 
@@ -1902,7 +1908,9 @@ def prepare_chat_body(
 
     # ----- system prompt override (additive) -----
     if "messages" in body and isinstance(body["messages"], list):
-        body["messages"] = _inject_system_override_openai(body["messages"])
+        body["messages"] = _inject_system_override_openai(
+            body["messages"], harness=harness
+        )
 
     # ----- enforce input token limit (strip thinking, trim oldest) -----
     if "messages" in body and isinstance(body["messages"], list):
@@ -1916,7 +1924,10 @@ def prepare_chat_body(
 
 
 def prepare_messages_body(
-    body: Dict[str, Any], reasoning_mode: Optional[str] = None
+    body: Dict[str, Any],
+    reasoning_mode: Optional[str] = None,
+    *,
+    harness=None,
 ) -> Dict[str, Any]:
     """Normalize an incoming Anthropic /messages body for OpenRouter.
 
@@ -2039,7 +2050,7 @@ def prepare_messages_body(
     # ----- system prompt override -----
     if "messages" in body and isinstance(body["messages"], list):
         body["messages"], body["system"] = _inject_system_override_anthropic(
-            body["messages"], body.get("system")
+            body["messages"], body.get("system"), harness=harness
         )
 
     # ----- enforce input token limit (strip thinking, trim oldest) -----

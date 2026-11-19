@@ -32,6 +32,7 @@ from .translation import (
     openai_sse_to_anthropic_sse,
     _cache_reasoning_mode,
 )
+from .system_prompt import detect_harness
 from .utils import dumps, loads, request_id, ws_request_id
 from . import prettylog as pl
 
@@ -323,23 +324,17 @@ def _atlas_tool_call_item(state, status="completed", include_args=True):
     return item
 
 
-# Set by main.py during lifespan startup
-proxy: Optional[ProxyCore] = None
-
-
-def _is_duplicate_reasoning_error(resp) -> bool:
-    """Detect the serde 400 where `reasoning`/`reasoning_content` alias
-    collide upstream (model-dependent; not all providers reject it)."""
-    if resp is None:
-        return False
+def _is_duplicate_reasoning_error(resp: Response) -> bool:
+    """True if the upstream 400 body reports a duplicate reasoning_content field."""
     try:
-        body = loads(resp.body) if hasattr(resp, "body") else resp
-        text = dumps(body)
-        if isinstance(text, bytes):
-            text = text.decode("utf-8", "replace")
+        text = resp.body.decode("utf-8", errors="ignore")
         return "duplicate field" in text and "reasoning_content" in text
     except Exception:
         return False
+
+
+# Set by main.py during lifespan startup
+proxy: Optional[ProxyCore] = None
 
 
 @router.get("/")
@@ -680,7 +675,8 @@ async def responses_api(request: Request) -> Response:
     # converts custom/freeform tools into OpenAI function tools.
     original_custom_tools = _atlas_custom_tool_map(body.get("tools"))
 
-    body = prepare_chat_body(body)
+    _harness = detect_harness(dict(request.headers))
+    body = prepare_chat_body(body, harness=_harness)
     stream = bool(body.get("stream", False))
     payload = dumps(body)
     _payload_path = _dump_payload(rid, "", body)
@@ -1006,7 +1002,10 @@ async def chat_completions(request: Request) -> Response:
             headers={"x-request-id": rid},
         )
 
-    body = prepare_chat_body(body)
+    # Keep a deep copy for the self-healing retry path below
+    _original_body = loads(dumps(body))
+    _harness = detect_harness(dict(request.headers))
+    body = prepare_chat_body(body, harness=_harness)
     stream = bool(body.get("stream", False))
     payload = dumps(body)
 
@@ -1024,26 +1023,26 @@ async def chat_completions(request: Request) -> Response:
         request_id=rid,
     )
 
-    # Self-healing retry: model-dependent serde rejects duplicate
-    # reasoning/reasoning_content.  If upstream 400s, rebuild with
-    # strip mode, cache the working mode per (provider, model), retry once.
+    # Self-healing retry: some providers alias reasoning/reasoning_content
+    # and reject the duplicate. Rebuild with strip mode and retry once.
     if (
         not stream
+        and isinstance(resp, Response)
         and resp.status_code == 400
         and _is_duplicate_reasoning_error(resp)
     ):
-        model = body.get("model", "")
-        _cache_reasoning_mode(model, "strip")
-        retry_body = prepare_chat_body(loads(dumps(body)), reasoning_mode="strip")
+        _model = body.get("model", "") or get_default_model()
+        _cache_reasoning_mode(_model, "strip")
+        body = prepare_chat_body(_original_body, reasoning_mode="strip", harness=_harness)
+        payload = dumps(body)
         resp = await proxy.forward(
             "POST",
             get_chat_url(),
-            body=dumps(retry_body),
+            body=payload,
             extra_headers=_openrouter_attribution_headers(request, body.get("model", "")),
-            stream=False,
+            stream=stream,
             request_id=rid,
         )
-
     return resp
 
 @router.post("/v1/messages")
@@ -1077,7 +1076,11 @@ async def messages(request: Request) -> Response:
             headers={"x-request-id": rid},
         )
 
-    body = prepare_messages_body(body) if not provider_is_openai_compatible() else prepare_chat_body(body)
+    # Keep a deep copy for the self-healing retry path below
+    _original_body = loads(dumps(body))
+    _harness = detect_harness(dict(request.headers))
+    body = prepare_messages_body(body, harness=_harness) if not provider_is_openai_compatible() else prepare_chat_body(body, harness=_harness)
+    _is_messages_endpoint = not provider_is_openai_compatible()
     stream = bool(body.get("stream", False))
     payload = dumps(body)
 
@@ -1104,27 +1107,27 @@ async def messages(request: Request) -> Response:
         request_id=rid,
     )
 
-    # Self-healing retry: model-dependent serde rejects duplicate
-    # reasoning/reasoning_content.  If upstream 400s, rebuild with
-    # strip mode, cache the working mode per (provider, model), retry once.
+    # Self-healing retry: some providers alias reasoning/reasoning_content
+    # and reject the duplicate. Rebuild with strip mode and retry once.
     if (
         not stream
+        and isinstance(resp, Response)
         and resp.status_code == 400
         and _is_duplicate_reasoning_error(resp)
     ):
-        model = body.get("model", "")
-        _cache_reasoning_mode(model, "strip")
-        retry_body = (
-            prepare_chat_body(loads(dumps(body)), reasoning_mode="strip")
-            if provider_is_openai_compatible()
-            else prepare_messages_body(loads(dumps(body)), reasoning_mode="strip")
-        )
+        _model = body.get("model", "") or get_default_model()
+        _cache_reasoning_mode(_model, "strip")
+        if _is_messages_endpoint:
+            body = prepare_messages_body(_original_body, reasoning_mode="strip", harness=_harness)
+        else:
+            body = prepare_chat_body(_original_body, reasoning_mode="strip", harness=_harness)
+        payload = dumps(body)
         resp = await proxy.forward(
             "POST",
             upstream_url,
-            body=dumps(retry_body),
-            extra_headers=extra,
-            stream=False,
+            body=payload,
+            extra_headers=_openrouter_attribution_headers(request, body.get("model", "")),
+            stream=stream,
             request_id=rid,
         )
 
@@ -1188,6 +1191,7 @@ async def _stream_openai_to_anthropic(rid: str, upstream_url: str, payload: byte
             "tool_blocks": {},
         }
         emitted_any = False
+        terminal_seen = False
 
         # Stream from upstream (proxy.iter_upstream_sse or proxy.forward already returned a StreamingResponse)
         async for raw in resp.body_iterator:
@@ -1227,10 +1231,10 @@ async def _stream_openai_to_anthropic(rid: str, upstream_url: str, payload: byte
                 })
                 return
 
-            # OpenAI SSE per-chunk diagnostics (debug only — too noisy for INFO)
+            # HF SSE per-chunk diagnostics (debug only — too noisy for INFO)
             try:
                 log.debug(
-                    "req=%s OPENAI_SSE_CHUNK %s",
+                    "req=%s HF_SSE_CHUNK %s",
                     rid,
                     data_line.decode("utf-8", errors="replace")[:4000],
                 )
@@ -1244,10 +1248,10 @@ async def _stream_openai_to_anthropic(rid: str, upstream_url: str, payload: byte
             ):
                 if evt_data is None:
                     continue
-                # Terminal finish_reason events are only meaningful if real
-                # output was produced. Buffer them when nothing has been
-                # emitted yet so a zero-output turn yields exactly one
-                # terminal outcome (the error below), never both.
+                # A message_delta represents the upstream finish_reason.
+                if evt_name == "message_delta":
+                    terminal_seen = True
+                # Never report a successful completion for an empty response.
                 if evt_name == "message_delta" and not emitted_any:
                     continue
                 # Only real output counts as visible content. Scaffolding
@@ -1263,27 +1267,28 @@ async def _stream_openai_to_anthropic(rid: str, upstream_url: str, payload: byte
                         emitted_any = True
                 yield _sse_event(evt_name, evt_data)
 
-        if not emitted_any:
-            # Upstream produced zero visible output. Close the scaffolding
-            # block first so the event stream is well-formed, then surface
-            # an explicit error instead of a clean empty turn — an empty
-            # successful assistant message makes the client synthesize a
-            # "your previous response had no visible output" nudge,
-            # which then loops through every later turn.
+        if not emitted_any or not terminal_seen:
+            # An upstream EOF without finish_reason is an interrupted
+            # response, not a successful assistant turn.
             yield _sse_event("content_block_stop", {
                 "type": "content_block_stop",
                 "index": 0,
             })
+            message = (
+                "Upstream produced no output; retry the turn"
+                if not emitted_any
+                else "Upstream stream ended before completion; retry the turn"
+            )
             yield _sse_event("error", {
                 "type": "error",
                 "error": {
                     "type": "api_error",
-                    "message": "Upstream produced no output; retry the turn",
+                    "message": message,
                 },
             })
             return
 
-        # Close events
+        # Only send message_stop after an actual upstream finish_reason.
         yield _sse_event("content_block_stop", {
             "type": "content_block_stop",
             "index": 0,
