@@ -142,7 +142,7 @@ def has_systemctl() -> bool:
 
 
 def get_proxy_url() -> str:
-    return os.environ.get("ATLAS_PROXY_URL", "http://127.0.0.1:8000")
+    return os.environ.get("ATLAS_PROXY_URL", "http://127.0.0.1:8788")
 
 
 def _resolve_listen() -> tuple[str, int]:
