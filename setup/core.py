@@ -196,9 +196,76 @@ def append_keys(path: Path, new_keys: list[str]) -> int:
     return len(to_add)
 
 
+KEY_PREFIXES = ("sk-", "sk-ant-", "sk-proj-", "sk-openai-", "nvapi-")
+"""Accepted key prefixes, mirroring ``proxy.keypool._KEY_PREFIXES``.
+
+Duplicated rather than imported: ``setup.core`` is stdlib-only and must run
+before third-party deps (and therefore ``proxy.*``) are importable.  Keep the
+two in sync — ``tests/test_windows_shim.py`` guards the ``sk-`` cases.
+"""
+
+
 def key_prefix_ok(key: str) -> bool:
-    """Sanity check: OpenRouter keys start with 'sk-or-'."""
-    return key.startswith("sk-or-")
+    """Sanity check: does the key look like one the proxy can load?
+
+    Mirrors ``proxy.keypool._KEY_PREFIXES`` — the loader that actually decides
+    whether a key is usable.  It accepts any ``sk-`` key (OpenRouter's
+    ``sk-or-``, plus ``sk-ant-``/``sk-proj-``/``sk-openai-``) and NVIDIA's
+    ``nvapi-``.  Requiring ``sk-or-`` here warned on keys the proxy would
+    happily load, so the check was a false negative rather than a safeguard.
+    """
+    return key.startswith(KEY_PREFIXES)
+
+
+# ---------------------------------------------------------------------------
+# OS-specific setup module
+# ---------------------------------------------------------------------------
+def _os_module():
+    """Return the OS-specific setup module (linux/macos/windows_setup).
+
+    Re-exported here because the installers (install.ps1 -Check/-Uninstall,
+    install.sh --check/--uninstall) call ``core._os_module()`` from an inline
+    script.  It originally lived only in ``setup.wizard``, so every one of
+    those paths died with AttributeError.  ``setup.wizard`` keeps its own
+    wrapper and delegates here, so there is a single source of truth.
+    """
+    import importlib
+
+    return importlib.import_module(f".{_detect_os_name()}_setup", package="setup")
+
+
+def _detect_os_name() -> str:
+    """Map the host to a setup-module suffix (linux/macos/windows)."""
+    sysname = platform.system().lower()
+    if sysname == "darwin":
+        return "macos"
+    if sysname in ("windows", "win32"):
+        return "windows"
+    if sysname == "linux":
+        return "linux"
+    # Unknown POSIX-ish host: linux_setup is the closest safe default.
+    return "linux"
+
+
+def start_proxy(repo: Path) -> tuple[bool, str]:
+    """Start the proxy via the OS supervisor (see setup._supervisor)."""
+    from . import _supervisor
+
+    return _supervisor.start_proxy(repo)
+
+
+def verify_startup(repo: Path) -> tuple[bool, str]:
+    """Report the active runtime's status (see setup._supervisor)."""
+    from . import _supervisor
+
+    return _supervisor.verify_startup(repo)
+
+
+def uninstall_runtime(repo: Path) -> tuple[bool, str]:
+    """Stop the proxy and remove its runtime config (see setup._supervisor)."""
+    from . import _supervisor
+
+    return _supervisor.uninstall_runtime(repo)
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +397,8 @@ __all__ = [
     "key_file", "runtime_provider_file", "log_file", "pid_file",
     "ensure_data_dirs", "create_venv", "install_requirements",
     "deps_importable", "bootstrap",
-    "read_keys", "append_keys", "key_prefix_ok",
+    "read_keys", "append_keys", "key_prefix_ok", "KEY_PREFIXES",
     "proxy_port", "health_url", "write_runtime_provider",
     "health_check", "is_port_in_use", "start_proxy_detached",
+    "_os_module", "verify_startup", "uninstall_runtime", "start_proxy",
 ]

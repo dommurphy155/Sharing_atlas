@@ -81,6 +81,28 @@ def _shim_header() -> str:
     return "Atlas CLI - installed by the cross-platform installer."
 
 
+def _resolve_install_dir(repo) -> Path:
+    """Return the Atlas install dir as a fully-resolved absolute path.
+
+    ``repo`` may arrive relative (or via a symlinked checkout), so anchor it
+    against this file's own location before resolving.  The shim bakes this
+    value in, so it must never depend on the caller's cwd or on PATHEXT-style
+    lookup.  No drive letter or username is ever assumed.
+    """
+    return Path(repo).expanduser().resolve()
+
+
+def _shim_quote(value: str) -> str:
+    """Quote a path for embedding in a generated shim.
+
+    Doubles any literal ``%`` so cmd.exe does not expand it as a variable when
+    the shim runs (a directory named ``%TEMP%\\atlas`` would otherwise point
+    somewhere else entirely).  The caller wraps the result in double quotes,
+    which is what makes spaces, ``&``, ``^`` and non-ASCII paths safe.
+    """
+    return str(value).replace("%", "%%")
+
+
 def make_posix_shim(repo: Path, bin_dir: Path) -> tuple[bool, str]:
     """Install the POSIX CLI wrapper without overwriting an existing command."""
     existing = _atlas_on_path()
@@ -163,26 +185,53 @@ def make_windows_shim(repo, bin_dir=None):
     (install.ps1, PowerShell's ``$HOME``) resolve it differently from
     ``Path.home()`` on domain/redirected-profile machines.
     """
-    python = Path(core.venv_python(repo))
-    target = repo / "atlas" / "bin" / "atlas"
+    install_dir = _resolve_install_dir(repo)
+    python = Path(core.venv_python(install_dir))
+    target = install_dir / "atlas" / "bin" / "atlas"
 
     if not python.is_file():
         return False, f"Virtualenv Python not found: {python}"
     if not target.is_file():
         return False, f"Atlas CLI not found: {target}"
 
+    # Both paths are absolute + resolved, so the shim works from any cwd and
+    # on any drive.  Doubling '%' keeps cmd.exe from expanding it at run time.
+    py_arg = _shim_quote(python)
+    target_arg = _shim_quote(target)
+
     home = Path(os.environ.get("USERPROFILE") or os.path.expanduser("~"))
     bin_dir = home / ".local" / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
 
+    # A shim left behind by a *different* install (another drive, another
+    # checkout, a deleted /tmp test dir) must not be silently hijacked: the
+    # last installer to run would win and earlier installs would break.  Match
+    # the POSIX path's behaviour (see make_posix_shim) and stand down, naming
+    # the command that already owns the name.
+    existing_cmd = bin_dir / "atlas.cmd"
+    if existing_cmd.is_file():
+        try:
+            current = existing_cmd.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            current = ""
+        if target_arg not in current:
+            return True, (
+                f"Atlas command already exists at {existing_cmd} (points at a "
+                f"different install); skipped. Remove it to reinstall."
+            )
+
     # --- PowerShell / cmd wrapper (atlas.cmd) ---
-    # localsetend keeps env changes from leaking; quoted "%*" so arguments with
-    # spaces, '&', or '^' reach the CLI intact instead of being re-parsed by cmd.
+    # %* is deliberately UNQUOTED: quoting it ("\"%*\"") collapses every
+    # argument into a single token, so `atlas restart --nvidia <model>` would
+    # arrive as one argv entry.  Unquoted %* preserves argument boundaries and
+    # keeps each argument's own quoting intact.
+    # setlocal keeps env changes local; the resolved absolute paths mean the
+    # current drive and cwd are irrelevant.
     cmd_shim = bin_dir / "atlas.cmd"
     cmd_shim.write_text(
         '@echo off\r\n'
         'setlocal\r\n'
-        f'"{python}" "{target}" "%*"\r\n'
+        f'"{py_arg}" "{target_arg}" %*\r\n'
         'endlocal & exit /b %ERRORLEVEL%\r\n',
         encoding="utf-8",
         newline="",
@@ -191,6 +240,9 @@ def make_windows_shim(repo, bin_dir=None):
     # --- POSIX wrapper (atlas, no extension) for Git Bash / MSYS2 ---
     # Git Bash does not resolve .cmd files when you type a bare command,
     # so we also drop a #!/bin/sh wrapper next to the .cmd shim.
+    # "$@" preserves argument boundaries exactly, including spaces and special
+    # characters.  sh does not expand '%', so this uses the raw path rather
+    # than the cmd-escaped one.
     posix_shim = bin_dir / "atlas"
     posix_shim.write_text(
         "#!/bin/sh\n"
@@ -203,6 +255,17 @@ def make_windows_shim(repo, bin_dir=None):
         _chmodx(posix_shim)
     except OSError:
         pass
+
+    # Verify the generated cmd shim actually references this install.  A shim
+    # that resolves but points elsewhere is the failure mode this whole
+    # function exists to prevent, so surface it here rather than leaving the
+    # user with "python: can't open file".
+    try:
+        written = cmd_shim.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return False, f"Could not read back {cmd_shim}: {exc}"
+    if target_arg not in written:
+        return False, f"Generated {cmd_shim} does not reference {target}"
 
     # --- Register bin_dir in the User PATH ---
     # Two writers touch this: PowerShell's [Environment]::SetEnvironmentVariable

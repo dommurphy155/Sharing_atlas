@@ -45,32 +45,6 @@ def _intro() -> None:
     CONSOLE.print(Panel(Text.from_markup(body), title=title, border_style="cyan"))
 
 
-def _clear_windows_key_files(repo):
-    """Clear configured OpenRouter key files before collecting fresh keys."""
-    import sys
-    if str(repo) not in sys.path:
-        sys.path.insert(0, str(repo))
-
-    paths = [core.key_file(repo)]
-    try:
-        from proxy import config
-        paths.extend((Path(config.KEY_FILE), Path(config.FALLBACK_KEY_FILE)))
-    except Exception as exc:
-        CONSOLE.print(f"[yellow]Could not load configured key paths: {exc}[/yellow]")
-
-    unique = {}
-    for path in paths:
-        path = Path(path).expanduser()
-        if not path.is_absolute():
-            path = repo / path
-        path = path.resolve()
-        unique[str(path).casefold()] = path
-
-    for path in unique.values():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("", encoding="utf-8")
-    CONSOLE.print(f"[dim]Cleared {len(unique)} configured key file(s).[/dim]")
-
 def _collect_keys(repo: Path) -> list[str]:
     """Prompt the user for OpenRouter API keys. Returns the full key list."""
     # Preserve existing keys on every platform; collection handles additions.
