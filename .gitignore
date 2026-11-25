@@ -25,6 +25,20 @@ __pycache__/
 # Installer log (debugging artifact; lives per-install dir)
 .installer.log
 
+# Runtime logs — written continuously by the running proxy, never source
+data/run.log
+proxy/logs/
+*.log
+
+# Runtime state — per-install, machine-specific
+data/run.pid
+data/proxy_data/
+data/runtime.json
+data/startup.log
+
+# Local caches
+.cache/
+
 .windows-installer-backup-*/
 .backup_sudo_free/
 .plugin-config/
