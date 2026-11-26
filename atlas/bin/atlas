@@ -539,6 +539,15 @@ def cmd_version(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Dashboard subcommand (admin web UI) — delegates to dashboard_cli
+# ---------------------------------------------------------------------------
+def cmd_dashboard(args) -> int:
+    sys.path.insert(0, str(REPO_ROOT / "atlas" / "bin"))
+    from dashboard_cli import dispatch  # noqa: WPS433
+    return dispatch(args)
+
+
+# ---------------------------------------------------------------------------
 # Key import — append+dedupe into the configured key file (NEVER overwrite)
 # ---------------------------------------------------------------------------
 def _resolve_key_file() -> Path:
@@ -777,6 +786,13 @@ examples:
     sp_ikf.add_argument("path", help="Path to a text file of keys")
     sp_ikf.add_argument("--dry-run", action="store_true", dest="dry_run",
                         help="Preview what would be added without writing")
+
+    # dashboard <setup-token|start|stop|restart|status>
+    sp_dash = sub.add_parser("dashboard", help="Manage the Atlas web dashboard")
+    dash_sub = sp_dash.add_subparsers(dest="dashboard_command")
+    for dname in ("setup-token", "start", "stop", "restart", "status"):
+        dash_sub.add_parser(dname, help=f"dashboard {dname}")
+    sp_dash.set_defaults(_atlas_cmd=cmd_dashboard)
 
     return p
 

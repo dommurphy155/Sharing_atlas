@@ -43,3 +43,21 @@ data/startup.log
 .backup_sudo_free/
 .plugin-config/
 .session-summary.md
+
+# --- Dashboard (added with the management UI) ---
+# Runtime state: SQLite DB holds the admin password hash and live sessions.
+data/dashboard/
+data/dashboard.pid
+data/dashboard.log
+data/dashboard/
+dashboard/.impeccable/review/
+artifacts/
+
+# Node / build output
+dashboard/web/node_modules/
+dashboard/web/dist/
+dashboard/web/.vite/
+dashboard/.impeccable/
+
+# TypeScript incremental build cache
+tsconfig.tsbuildinfo

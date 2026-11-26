@@ -1,0 +1,121 @@
+/* Atlas design tokens — graphite + amber. No gradients anywhere in this system.
+   Every component references these; no stray hex values in component files. */
+
+:root {
+  /* Surfaces — a graphite ramp, cool-neutral, four steps */
+  --bg: #0d0f11;
+  --surface: #14171a;
+  --surface-2: #1a1e22;
+  --surface-3: #22272c;
+  --border: #2c3238;
+  --border-soft: #23282d;
+
+  /* Text */
+  --text: #e8eaed;
+  --text-2: #a8b0b8;
+  --text-3: #7e878f;
+
+  /* Single accent — amber. Used for focus, active, primary action, key figures. */
+  --accent: #e8a33d;
+  --accent-dim: #b57f2c;
+  --accent-wash: rgba(232, 163, 61, 0.12);
+  --accent-line: rgba(232, 163, 61, 0.32);
+
+  /* Semantic — desaturated so they never compete with the accent.
+     Values are the text-safe steps: all ≥4.5:1 on both card and bg. */
+  --ok: #6cab80;
+  --ok-wash: rgba(95, 158, 115, 0.12);
+  --warn: #cbaa55;
+  --warn-wash: rgba(194, 160, 74, 0.12);
+  --bad: #cc7770;
+  --bad-wash: rgba(181, 96, 90, 0.12);
+  --info: #6b8ba8;
+
+  /* Radius — tight. This is an instrument, not a mobile app. */
+  --r-1: 4px;
+  --r-2: 6px;
+  --r-3: 8px;
+
+  /* Spacing — 4px base */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-7: 32px;
+  --s-8: 40px;
+  --s-9: 48px;
+
+  /* Type */
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --sidebar-w: 232px;
+  --topbar-h: 52px;
+
+  /* Elevation is a border, not a shadow. One soft shadow for overlays only. */
+  --shadow-pop: 0 8px 28px rgba(0, 0, 0, 0.55);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--accent-wash);
+  color: var(--text);
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--surface-3);
+  border-radius: 6px;
+  border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-feature-settings: "tnum";
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: var(--r-1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

@@ -1,0 +1,27 @@
+[Unit]
+Description=Atlas Dashboard (management UI)
+After=network-online.target
+Wants=network-online.target
+# Deliberately NOT ordered against the proxy: the dashboard must survive proxy
+# restarts and must be reachable when the proxy is down (that is when you need
+# it most). It talks to the proxy over HTTP and reports it as unreachable.
+
+[Service]
+Type=simple
+WorkingDirectory=/root/atlas
+ExecStart=/root/atlas/.venv/bin/python -m dashboard.api.main
+Restart=always
+RestartSec=3
+
+# Bind to loopback: nginx is the only way in, TLS terminates there.
+# Set DASHBOARD_HOST=0.0.0.0 only for a trusted LAN, never for the internet.
+Environment=DASHBOARD_HOST=127.0.0.1
+Environment=DASHBOARD_PORT=8080
+Environment=DASHBOARD_ALLOWED_HOSTS=SERVER_HOST,localhost,127.0.0.1
+Environment=DASHBOARD_PUBLIC_TLS=1
+
+StandardOutput=append:/root/atlas/data/dashboard.log
+StandardError=append:/root/atlas/data/dashboard.log
+
+[Install]
+WantedBy=multi-user.target
