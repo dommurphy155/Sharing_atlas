@@ -12,6 +12,11 @@ site-packages/
 # Atlas proxy API keys — keep credentials private
 openroute_keys.txt
 
+# Local environment file — holds machine-specific config and secrets
+.env
+.env.*
+!.env.example
+
 # Python bytecode cache (auto-generated on import; never commit)
 __pycache__/
 *.pyc
@@ -61,3 +66,12 @@ dashboard/.impeccable/
 
 # TypeScript incremental build cache
 tsconfig.tsbuildinfo
+
+# --- Local documentation ---
+# Working notes and design docs stay out of the repo (removed in 22de889).
+docs/
+
+# Host-specific deploy files — reference this machine's live nginx config,
+# real IPs and cert paths. Tracked templates use SERVER_HOST placeholders.
+dashboard/deploy/nginx-live.conf
+dashboard/deploy/*.disabled
