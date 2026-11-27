@@ -7,11 +7,14 @@
 
 const BASE = (() => {
   const m = document.querySelector("meta[name='atlas-base']");
-  if (m?.getAttribute("content")) return m.getAttribute("content")!.replace(/\/$/, "");
+  if (m?.getAttribute("content"))
+    return m.getAttribute("content")!.replace(/\/$/, "");
   const p = window.location.pathname;
   const i = p.indexOf("/atlas");
   return i >= 0 ? "/atlas" : "";
 })();
+
+const REQUEST_TIMEOUT = 30_000; // 30s
 
 function csrfToken(): string {
   const m = document.cookie.match(/(?:^|;\s*)atlas_csrf=([^;]+)/);
@@ -23,22 +26,39 @@ async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = { ...(opts.headers as any) };
   if (method !== "GET") headers["x-csrf-token"] = csrfToken();
   if (opts.body) headers["content-type"] = "application/json";
-  const res = await fetch(`${BASE}/api${path}`, {
-    ...opts,
-    headers,
-    credentials: "include",
-  });
-  if (!res.ok) {
-    let detail = res.statusText;
-    try {
-      const j = await res.json();
-      detail = j.detail || detail;
-    } catch {
-      /* */
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+
+  try {
+    const res = await fetch(`${BASE}/api${path}`, {
+      ...opts,
+      headers,
+      credentials: "include",
+      signal: controller.signal,
+    });
+
+    // Validate content-type is JSON (defense against unexpected HTML error pages)
+    const ct = res.headers.get("content-type") || "";
+    if (!ct.includes("application/json") && res.ok) {
+      throw new Error("Unexpected response format");
     }
-    throw new Error(detail);
+
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const j = await res.json();
+        // Support both old format (detail) and new format (error.detail)
+        detail = j.detail || j.error?.detail || detail;
+      } catch {
+        /* ignore parse errors */
+      }
+      throw new Error(detail);
+    }
+    return res.json() as Promise<T>;
+  } finally {
+    clearTimeout(timeout);
   }
-  return res.json() as Promise<T>;
 }
 
 export const api = {
@@ -141,6 +161,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ session_id }),
     }),
+
+  // Audit chain verification
+  auditVerify: () => req<any>("/security/audit/verify"),
 };
 
 export { csrfToken };

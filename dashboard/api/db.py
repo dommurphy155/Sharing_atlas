@@ -1,6 +1,7 @@
 """SQLite persistence for dashboard-owned state only.
 
-Tables: admin, sessions, audit_log, setup_token, login_attempt, metric_samples.
+Tables: admin, sessions, audit_log, setup_token, login_attempt, metric_samples,
+        password_history, rate_limit.
 Proxy keys/config live in their existing files — never duplicated here.
 """
 from __future__ import annotations
@@ -43,7 +44,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
     event         TEXT NOT NULL,
     actor         TEXT,
     ip            TEXT,
-    detail        TEXT
+    detail        TEXT,
+    hmac          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS setup_token (
@@ -78,6 +80,18 @@ CREATE TABLE IF NOT EXISTS recovery_code (
     code_hash     TEXT NOT NULL,
     used          INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS password_history (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    password_hash TEXT NOT NULL,
+    created_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rate_limit (
+    key           TEXT PRIMARY KEY,
+    window_start  INTEGER NOT NULL,
+    count         INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -85,6 +99,11 @@ def init_db() -> None:
     ensure_data_dir()
     with connect() as conn:
         conn.executescript(_SCHEMA)
+        # Migrate: add hmac column to audit_log if missing (existing DBs)
+        try:
+            conn.execute("SELECT hmac FROM audit_log LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE audit_log ADD COLUMN hmac TEXT")
 
     # Lock down the DB file and its directory every boot: SQLite creates 0644,
     # which would expose the admin hash and session tokens to local accounts.
@@ -103,18 +122,23 @@ def connect() -> Iterator[sqlite3.Connection]:
 
 
 def harden_permissions() -> None:
-    """Restrict the DB and its directory to the owner.
+    """Restrict the DB, WAL, SHM, and its directory to the owner.
 
     The database holds the admin Argon2 hash and live session tokens. SQLite
     creates it 0644 by default, which is world-readable on a shared box — any
     local account could lift a session cookie and skip authentication
     entirely. Directories need the execute bit to be traversable, so 0700.
+    WAL and SHM files inherit the DB's permissions but are created
+    separately — harden them too.
     """
     try:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(DB_PATH.parent, 0o700)
-        if DB_PATH.exists():
-            os.chmod(DB_PATH, 0o600)
+        # Harden main DB + WAL + SHM
+        for suffix in ("", "-wal", "-shm"):
+            p = DB_PATH.with_name(DB_PATH.name + suffix) if suffix else DB_PATH
+            if p.exists():
+                os.chmod(p, 0o600)
     except OSError:
         # A read-only or foreign filesystem must not stop the app booting;
         # the next successful write retries via init_db().

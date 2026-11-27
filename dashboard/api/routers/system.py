@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 
-from ..deps import require_session, require_csrf, require_reauth, client_ip
+from ..deps import require_session, require_csrf, require_reauth, client_ip, rate_limit
 from ..services import (
     proxy_client, runtime_service, config_service, key_service,
     system_service, analytics_service, log_service,
@@ -95,6 +95,7 @@ class ActionBody(BaseModel):
 def unit_action(unit: str, action: str, body: ActionBody, request: Request) -> dict:
     require_session(request)
     require_csrf(request)
+    rate_limit(request, 5, window=60)  # max 5 system actions/min
     if not require_reauth(request, body.password):
         raise HTTPException(403, "Reauthentication failed")
     if unit not in ("proxy", "dashboard"):
@@ -118,6 +119,7 @@ class BackupBody(BaseModel):
 def make_backup(body: BackupBody, request: Request) -> dict:
     require_session(request)
     require_csrf(request)
+    rate_limit(request, 3, window=60)  # max 3 backups/min
     if not require_reauth(request, body.password):
         raise HTTPException(403, "Reauthentication failed")
     res = system_service.backup_config(body.label.strip()[:32])

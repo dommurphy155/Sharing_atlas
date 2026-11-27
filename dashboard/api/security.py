@@ -1,17 +1,30 @@
-"""Security primitives: password hashing, setup token, sessions, audit."""
+"""Security primitives: password hashing, setup token, sessions, audit.
+
+All hardening per audit: Argon2 upgrade path, TOTP encryption, password history,
+session concurrency limits, exponential lockout, audit HMAC chain, recovery codes.
+"""
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import os
 import secrets
 import time
 from typing import Optional
 
 from . import db
 from .config import (
+    AUDIT_HMAC_KEY,
+    LOCKOUT_LEVEL_COUNTS,
+    LOCKOUT_THRESHOLDS,
+    MAX_CONCURRENT_SESSIONS,
+    PASSWORD_HISTORY,
     SESSION_ABSOLUTE_SECONDS,
     SESSION_IDLE_SECONDS,
     SETUP_TOKEN_TTL_SECONDS,
+    TOTP_ENCRYPTION_KEY,
+    TOTP_WINDOW,
 )
 
 
@@ -21,12 +34,47 @@ from .config import (
 # ---------------------------------------------------------------------------
 def _ph():
     from argon2 import PasswordHasher
-    return PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, salt_len=16)
+    return PasswordHasher(
+        time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, salt_len=16,
+    )
 
 
 def _pyotp():
     import pyotp
     return pyotp
+
+
+# ---------------------------------------------------------------------------
+# TOTP secret encryption (envelope: AES-GCM if key present, else plaintext)
+# ---------------------------------------------------------------------------
+def _totp_encrypt(plaintext: str) -> str:
+    """Encrypt TOTP secret at rest. Returns base64 or plaintext (dev)."""
+    if not TOTP_ENCRYPTION_KEY:
+        return plaintext  # dev mode — warn at startup
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        aes = AESGCM(TOTP_ENCRYPTION_KEY[:32])
+        nonce = os.urandom(12)
+        ct = aes.encrypt(nonce, plaintext.encode(), None)
+        return "enc:" + base64.b64encode(nonce + ct).decode()
+    except ImportError:
+        return plaintext  # cryptography not installed — dev fallback
+
+
+def _totp_decrypt(stored: str) -> Optional[str]:
+    """Decrypt TOTP secret. Returns None on failure."""
+    if not stored:
+        return None
+    if not stored.startswith("enc:") or not TOTP_ENCRYPTION_KEY:
+        return stored  # plaintext (dev or legacy)
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        raw = base64.b64decode(stored[4:])
+        nonce, ct = raw[:12], raw[12:]
+        aes = AESGCM(TOTP_ENCRYPTION_KEY[:32])
+        return aes.decrypt(nonce, ct, None).decode()
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -36,12 +84,29 @@ def hash_password(pw: str) -> str:
     return _ph().hash(pw)
 
 
-def verify_password(pw: str, hashed: str) -> bool:
-    from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
+def verify_password(pw: str, hashed: str) -> tuple[bool, str | None]:
+    """Verify password. Returns (ok, new_hash_if_rehash_needed).
+
+    If the hash uses outdated parameters, returns a new hash to persist.
+    """
+    from argon2.exceptions import (
+        VerifyMismatchError,
+        VerificationError,
+        InvalidHashError,
+    )
     try:
-        return _ph().verify(hashed, pw)
+        ph = _ph()
+        ok = ph.verify(hashed, pw)
+        if not ok:
+            return False, None
+        # Check if hash needs rehashing (stronger params available)
+        try:
+            needs_rehash = ph.check_needs_rehash(hashed)
+        except Exception:
+            needs_rehash = False
+        return True, ph.hash(pw) if needs_rehash else None
     except (VerifyMismatchError, VerificationError, InvalidHashError):
-        return False
+        return False, None
 
 
 def password_strength_ok(pw: str) -> tuple[bool, str]:
@@ -57,6 +122,35 @@ def password_strength_ok(pw: str) -> tuple[bool, str]:
     if not any(not c.isalnum() for c in pw):
         return False, "Password must include a symbol."
     return True, "ok"
+
+
+def password_reused(pw: str) -> bool:
+    """Check if password matches any of the last N in history."""
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT password_hash FROM password_history ORDER BY id DESC LIMIT ?",
+            (PASSWORD_HISTORY,),
+        ).fetchall()
+    for row in rows:
+        ok, _ = verify_password(pw, row["password_hash"])
+        if ok:
+            return True
+    return False
+
+
+def record_password_history(password_hash: str) -> None:
+    """Store password hash in history (prune to last N)."""
+    ts = db.now()
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO password_history (password_hash, created_at) VALUES (?, ?)",
+            (password_hash, ts),
+        )
+        conn.execute(
+            "DELETE FROM password_history WHERE id NOT IN "
+            "(SELECT id FROM password_history ORDER BY id DESC LIMIT ?)",
+            (PASSWORD_HISTORY,),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -100,38 +194,41 @@ def create_admin(username: str, password: str, totp_secret: str | None = None,
                  token: str = "", ip: str = "", ua: str = "") -> tuple[bool, str]:
     """Atomic one-time admin creation.
 
-    No setup token required — the first password set claims the admin slot.
-    totp_secret is unused (kept for signature compatibility).
+    First password set claims the admin slot. TOTP secret is encrypted at rest.
     """
     ts = db.now()
+    encrypted_totp = _totp_encrypt(totp_secret) if totp_secret else None
     with db.connect() as conn:
-        # single writer lock via IMMEDIATE-like semantics: check then write in one txn
         exists = conn.execute("SELECT 1 FROM admin WHERE id = 1").fetchone()
         if exists:
             return False, "Administrator already exists."
         conn.execute(
             "INSERT INTO admin (id, username, password_hash, totp_secret, totp_enabled, "
-            "created_at, password_changed_at) VALUES (1, ?, ?, ?, 0, ?, ?)",
-            (username, hash_password(password), totp_secret, ts, ts),
+            "created_at, password_changed_at) VALUES (1, ?, ?, ?, ?, ?, ?)",
+            (username, hash_password(password), encrypted_totp,
+             1 if totp_secret else 0, ts, ts),
         )
-        conn.execute(
-            "INSERT INTO audit_log (ts, event, actor, ip, detail) VALUES (?,?,?,?,?)",
-            (ts, "admin_created", username, ip, "initial administrator provisioned"),
-        )
+        audit("admin_created", username, ip, "initial administrator provisioned")
     return True, "ok"
 
 
 def get_admin() -> Optional[dict]:
     with db.connect() as conn:
         row = conn.execute("SELECT * FROM admin WHERE id = 1").fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    d = dict(row)
+    # Decrypt TOTP secret for callers that need it
+    if d.get("totp_secret"):
+        d["totp_secret"] = _totp_decrypt(d["totp_secret"])
+    return d
 
 
 def verify_totp(secret: str | None, code: str | None) -> bool:
     if not secret or not code:
         return False
     try:
-        return _pyotp().TOTP(secret).verify(code.strip(), valid_window=1)
+        return _pyotp().TOTP(secret).verify(code.strip(), valid_window=TOTP_WINDOW)
     except Exception:
         return False
 
@@ -145,12 +242,69 @@ def totp_provisioning_uri(secret: str, username: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Recovery codes (bcrypt-hashed, single-use)
+# ---------------------------------------------------------------------------
+def generate_recovery_codes(count: int = 10) -> list[str]:
+    """Generate plaintext recovery codes (return once, store hashed)."""
+    import bcrypt
+    codes = []
+    with db.connect() as conn:
+        conn.execute("DELETE FROM recovery_code")
+        for _ in range(count):
+            raw = secrets.token_hex(8).upper()  # 16 hex chars
+            fmt = f"{raw[:4]}-{raw[4:8]}-{raw[8:12]}-{raw[12:]}"
+            codes.append(fmt)
+            conn.execute(
+                "INSERT INTO recovery_code (code_hash, used) VALUES (?, 0)",
+                (bcrypt.hashpw(fmt.encode(), bcrypt.gensalt(rounds=12)).decode(),),
+            )
+    return codes
+
+
+def verify_recovery_code(code: str) -> bool:
+    """Verify and consume a recovery code. Returns True if valid."""
+    import bcrypt
+    normalized = code.strip().upper().replace(" ", "").replace("-", "")
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT id, code_hash FROM recovery_code WHERE used = 0"
+        ).fetchall()
+        for row in rows:
+            # bcrypt hash is of the formatted version
+            for fmt in (code.strip().upper(), normalized):
+                try:
+                    if bcrypt.checkpw(fmt.encode(), row["code_hash"].encode()):
+                        conn.execute(
+                            "UPDATE recovery_code SET used = 1 WHERE id = ?",
+                            (row["id"],),
+                        )
+                        return True
+                except Exception:
+                    continue
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Sessions
 # ---------------------------------------------------------------------------
 def create_session(ip: str = "", ua: str = "") -> str:
+    """Create session, enforcing concurrency limit (revoke oldest if needed)."""
     sid = secrets.token_urlsafe(32)
     ts = db.now()
     with db.connect() as conn:
+        # Enforce max concurrent sessions
+        active = conn.execute(
+            "SELECT COUNT(*) AS n FROM sessions WHERE revoked = 0 AND expires_at > ?",
+            (ts,),
+        ).fetchone()["n"]
+        if active >= MAX_CONCURRENT_SESSIONS:
+            to_revoke = active - MAX_CONCURRENT_SESSIONS + 1
+            conn.execute(
+                "UPDATE sessions SET revoked = 1 WHERE id IN "
+                "(SELECT id FROM sessions WHERE revoked = 0 AND expires_at > ? "
+                " ORDER BY last_seen ASC LIMIT ?)",
+                (ts, to_revoke),
+            )
         conn.execute(
             "INSERT INTO sessions (id, created_at, last_seen, expires_at, ip, user_agent, revoked) "
             "VALUES (?,?,?,?,?,?,0)",
@@ -202,27 +356,58 @@ def list_sessions() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Audit
+# Audit (HMAC-chained for tamper evidence)
 # ---------------------------------------------------------------------------
+def _audit_hmac(prev_hmac: str, event: str, actor: str, ip: str, detail: str, ts: int) -> str:
+    if not AUDIT_HMAC_KEY:
+        return ""
+    msg = f"{prev_hmac}{ts}{event}{actor}{ip}{detail}".encode()
+    return hmac.new(AUDIT_HMAC_KEY, msg, "sha256").hexdigest()
+
+
 def audit(event: str, actor: str = "", ip: str = "", detail: str = "") -> None:
+    ts = db.now()
     with db.connect() as conn:
+        last = conn.execute(
+            "SELECT hmac FROM audit_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        prev = last["hmac"] if last and last["hmac"] else ""
+        chain = _audit_hmac(prev, event, actor, ip, detail, ts)
         conn.execute(
-            "INSERT INTO audit_log (ts, event, actor, ip, detail) VALUES (?,?,?,?,?)",
-            (db.now(), event, actor, ip, detail),
+            "INSERT INTO audit_log (ts, event, actor, ip, detail, hmac) VALUES (?,?,?,?,?,?)",
+            (ts, event, actor, ip, detail, chain),
         )
+
+
+def verify_audit_chain() -> tuple[bool, int]:
+    """Verify HMAC chain integrity. Returns (ok, broken_at_id)."""
+    if not AUDIT_HMAC_KEY:
+        return True, 0  # no key = no chain
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT id, ts, event, actor, ip, detail, hmac FROM audit_log ORDER BY id"
+        ).fetchall()
+    prev = ""
+    for row in rows:
+        expected = _audit_hmac(prev, row["event"] or "", row["actor"] or "",
+                               row["ip"] or "", row["detail"] or "", row["ts"])
+        if not hmac.compare_digest(expected, row["hmac"] or ""):
+            return False, row["id"]
+        prev = row["hmac"] or ""
+    return True, 0
 
 
 def recent_audit(limit: int = 50) -> list[dict]:
     with db.connect() as conn:
         rows = conn.execute(
-            "SELECT ts, event, actor, ip, detail FROM audit_log ORDER BY id DESC LIMIT ?",
+            "SELECT ts, event, actor, ip, detail, hmac FROM audit_log ORDER BY id DESC LIMIT ?",
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------
-# Login rate limiting
+# Login rate limiting (exponential backoff)
 # ---------------------------------------------------------------------------
 def record_login(ip: str, username: str, ok: bool) -> None:
     with db.connect() as conn:
@@ -232,12 +417,81 @@ def record_login(ip: str, username: str, ok: bool) -> None:
         )
 
 
+def _lockout_duration(fail_count: int) -> int:
+    """Return lockout duration in seconds based on failure count."""
+    level = 0
+    for lvl, threshold in LOCKOUT_LEVEL_COUNTS.items():
+        if fail_count >= threshold:
+            level = lvl
+    if level == 0:
+        return 0
+    return LOCKOUT_THRESHOLDS.get(level, LOCKOUT_THRESHOLDS[max(LOCKOUT_THRESHOLDS)])
+
+
 def login_locked(ip: str) -> bool:
-    from .config import LOGIN_MAX_ATTEMPTS, LOGIN_WINDOW_SECONDS
-    since = db.now() - LOGIN_WINDOW_SECONDS
+    """Exponential lockout: 5→15min, 10→1hr, 20→24hr."""
+    return lockout_remaining(ip) > 0
+
+
+def lockout_remaining(ip: str) -> int:
+    """Seconds left in the current lockout window (0 = not locked).
+
+    Also used to populate Retry-After on the 429 response.
+    """
+    ts = db.now()
+    with db.connect() as conn:
+        # Count failures in the last hour
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM login_attempt "
+            "WHERE ip = ? AND ts > ? AND ok = 0",
+            (ip, ts - 3600),
+        ).fetchone()
+        fail_count = row["n"] or 0
+        if fail_count == 0:
+            return 0
+        lockout = _lockout_duration(fail_count)
+        if lockout == 0:
+            return 0
+        # Check if currently locked
+        last_fail = conn.execute(
+            "SELECT ts FROM login_attempt WHERE ip = ? AND ok = 0 "
+            "ORDER BY ts DESC LIMIT 1",
+            (ip,),
+        ).fetchone()
+        if last_fail:
+            elapsed = ts - last_fail["ts"]
+            if elapsed < lockout:
+                return lockout - elapsed
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting (in-memory + DB-backed)
+# ---------------------------------------------------------------------------
+def rate_limit_check(key: str, limit: int, window: int = 60) -> tuple[bool, int]:
+    """Check rate limit. Returns (allowed, remaining).
+
+    Uses DB-backed counter for persistence across restarts.
+    """
+    ts = db.now()
+    window_start = ts - (ts % window)
     with db.connect() as conn:
         row = conn.execute(
-            "SELECT COUNT(*) AS n FROM login_attempt WHERE ip = ? AND ts > ? AND ok = 0",
-            (ip, since),
+            "SELECT count FROM rate_limit WHERE key = ? AND window_start = ?",
+            (key, window_start),
         ).fetchone()
-    return (row["n"] or 0) >= LOGIN_MAX_ATTEMPTS
+        if row:
+            count = row["count"] + 1
+            conn.execute(
+                "UPDATE rate_limit SET count = ? WHERE key = ? AND window_start = ?",
+                (count, key, window_start),
+            )
+        else:
+            count = 1
+            conn.execute(
+                "INSERT OR REPLACE INTO rate_limit (key, window_start, count) VALUES (?,?,?)",
+                (key, window_start, count),
+            )
+            # Cleanup old entries
+            conn.execute("DELETE FROM rate_limit WHERE window_start < ?", (ts - 3600,))
+    return count <= limit, max(0, limit - count)

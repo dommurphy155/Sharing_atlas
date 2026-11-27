@@ -19,6 +19,44 @@ Environment=DASHBOARD_HOST=127.0.0.1
 Environment=DASHBOARD_PORT=8080
 Environment=DASHBOARD_ALLOWED_HOSTS=SERVER_HOST,localhost,127.0.0.1
 Environment=DASHBOARD_PUBLIC_TLS=1
+# Security: set a 32-byte key for TOTP encryption and audit HMAC in production
+# Environment=DASHBOARD_TOTP_KEY=your-32-byte-hex-key-here
+# Environment=DASHBOARD_AUDIT_HMAC_KEY=your-32-byte-hex-key-here
+
+# --- Hardening --------------------------------------------------------------
+# No new privileges
+NoNewPrivileges=yes
+
+# Private /tmp — isolate from system temp
+PrivateTmp=yes
+
+# Protect system directories
+ProtectSystem=strict
+ProtectHome=yes
+
+# Read-only paths (code)
+ReadOnlyPaths=/root/atlas
+
+# Writable only where needed
+ReadWritePaths=/root/atlas/data /root/atlas/proxy/logs
+
+# Drop capabilities we don't need
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETGID CAP_SETUID
+AmbientCapabilities=
+
+# Restrict address families
+RestrictAddressFamilies=AF_UNIX AF_INET
+
+# System call filter (allowlist)
+SystemCallFilter=@system-service @clock @file-system @network-io @process-management @basic-io @memory @cpu-time
+SystemCallErrorNumber=EPERM
+
+# Restrict SUID/SGID
+NoNewPrivileges=yes
+
+# Memory / process limits
+LimitNOFILE=4096
+TasksMax=256
 
 StandardOutput=append:/root/atlas/data/dashboard.log
 StandardError=append:/root/atlas/data/dashboard.log

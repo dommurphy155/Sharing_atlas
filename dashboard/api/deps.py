@@ -1,35 +1,60 @@
-"""Request dependencies: session auth, CSRF, client IP."""
+"""Request dependencies: session auth, CSRF, client IP, rate limiting."""
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import secrets
 from typing import Optional
 
-from fastapi import HTTPException, Request, Cookie
+from fastapi import HTTPException, Request
 
 from . import security
-from .config import SESSION_COOKIE
+from .config import SESSION_COOKIE, TRUSTED_PROXIES
 
 CSRF_COOKIE = "atlas_csrf"
 CSRF_HEADER = "x-csrf-token"
 
 
-def client_ip(request: Request) -> str:
-    """Real client IP, proxy-aware.
+def _is_trusted_proxy(ip_str: str) -> bool:
+    """Check if an IP is in the trusted proxy CIDR list."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    for cidr in TRUSTED_PROXIES:
+        try:
+            if ip in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
 
-    Behind nginx, request.client.host is always 127.0.0.1 — so the login
-    throttle would bucket every attacker into one shared allowance and the
-    audit log would record nothing useful. Trust X-Forwarded-For only because
-    the app binds to loopback and nginx is the sole way in; X-Real-IP is set
-    by nginx from $remote_addr and is the value we want.
+
+def client_ip(request: Request) -> str:
+    """Real client IP, validated against trusted proxy chain.
+
+    X-Real-IP is set by nginx from $remote_addr — trusted because the app
+    binds to loopback and nginx is the sole ingress. X-Forwarded-For is
+    only trusted if the connecting peer is a known proxy; the left-most
+    non-proxy IP in the chain is the real client.
     """
+    # X-Real-IP: set by nginx, trustworthy
     real = request.headers.get("x-real-ip", "").strip()
     if real:
         return real
+
+    # X-Forwarded-For: validate the chain
     forwarded = request.headers.get("x-forwarded-for", "").strip()
     if forwarded:
-        # Left-most is the original client; the rest are proxy hops.
-        return forwarded.split(",")[0].strip()
+        chain = [h.strip() for h in forwarded.split(",") if h.strip()]
+        # Walk right-to-left; first non-trusted IP is the real client
+        for hop in reversed(chain):
+            if not _is_trusted_proxy(hop):
+                return hop
+        # All hops trusted — return left-most (edge case)
+        return chain[0] if chain else "unknown"
+
+    # Direct connection
     return request.client.host if request.client else "unknown"
 
 
@@ -56,7 +81,38 @@ def require_csrf(request: Request) -> None:
 
 
 def require_reauth(request: Request, password: str) -> bool:
+    """Re-authenticate with password for sensitive operations.
+
+    Also upgrades the password hash if Argon2 params have changed.
+    """
     admin = security.get_admin()
     if not admin:
         return False
-    return security.verify_password(password, admin["password_hash"])
+    ok, new_hash = security.verify_password(password, admin["password_hash"])
+    if not ok:
+        return False
+    # Upgrade hash if needed
+    if new_hash:
+        from . import db
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE admin SET password_hash = ? WHERE id = 1", (new_hash,)
+            )
+    return True
+
+
+def rate_limit(request: Request, limit: int, window: int = 60) -> None:
+    """Enforce per-IP rate limit. Raises 429 if exceeded."""
+    ip = client_ip(request)
+    allowed, remaining = security.rate_limit_check(f"rl:{ip}", limit, window)
+    request.state.rate_remaining = remaining
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Try again later.",
+            headers={
+                "Retry-After": str(window),
+                "X-RateLimit-Limit": str(limit),
+                "X-RateLimit-Remaining": "0",
+            },
+        )

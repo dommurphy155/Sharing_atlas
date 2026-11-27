@@ -130,7 +130,39 @@ def health_checks() -> Dict[str, Any]:
     })
     checks.append({"name": "dashboard database", "ok": _db_ok(),
                    "detail": "write/read ok" if _db_ok() else "unavailable"})
+    checks.append({"name": "file permissions", "ok": _perms_ok(),
+                   "detail": _perms_detail()})
     return {"checks": checks, "ok": all(c["ok"] for c in checks)}
+
+
+def _perms_ok() -> bool:
+    """Verify critical files have owner-only permissions."""
+    import stat
+    from ..config import DB_PATH, ENV_FILE
+    critical = [DB_PATH, ENV_FILE, _key_file()]
+    for p in critical:
+        try:
+            st = p.stat()
+            mode = stat.S_IMODE(st.st_mode)
+            if mode & 0o077:  # group or other has any access
+                return False
+        except OSError:
+            continue
+    return True
+
+
+def _perms_detail() -> str:
+    import stat
+    from ..config import DB_PATH, ENV_FILE
+    issues = []
+    for p in [DB_PATH, ENV_FILE, _key_file()]:
+        try:
+            mode = stat.S_IMODE(p.stat().st_mode)
+            if mode & 0o077:
+                issues.append(f"{p.name}={oct(mode)}")
+        except OSError:
+            pass
+    return ", ".join(issues) if issues else "all 0600"
 
 
 def _db_ok() -> bool:

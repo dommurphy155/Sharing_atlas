@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 
-from ..deps import require_session, require_csrf, require_reauth, client_ip
+from ..deps import require_session, require_csrf, require_reauth, client_ip, rate_limit
 from ..services import model_service, config_service
 from .. import security
 
@@ -39,6 +39,7 @@ class SwitchBody(BaseModel):
 def switch(body: SwitchBody, request: Request) -> dict:
     require_session(request)
     require_csrf(request)
+    rate_limit(request, 5, window=60)  # max 5 model switches/min
     if not require_reauth(request, body.password):
         raise HTTPException(403, "Reauthentication failed")
     if not body.model.strip():

@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 
-from ..deps import require_session, require_csrf, require_reauth, client_ip
+from ..deps import require_session, require_csrf, require_reauth, client_ip, rate_limit
 from ..services import config_service
 from .. import security
 
@@ -37,6 +37,7 @@ class ProviderBody(BaseModel):
 def set_provider(body: ProviderBody, request: Request) -> dict:
     require_session(request)
     require_csrf(request)
+    rate_limit(request, 5, window=60)  # max 5 provider switches/min
     if not require_reauth(request, body.password):
         raise HTTPException(403, "Reauthentication failed")
     if body.provider not in config_service.providers():
@@ -57,6 +58,7 @@ class EnvBody(BaseModel):
 def preview_env(body: EnvBody, request: Request) -> dict:
     require_session(request)
     require_csrf(request)
+    rate_limit(request, 20, window=60)  # max 20 previews/min
     if not require_reauth(request, body.password):
         raise HTTPException(403, "Reauthentication failed")
     return config_service.preview_env(body.values)
@@ -66,6 +68,7 @@ def preview_env(body: EnvBody, request: Request) -> dict:
 def write_env(body: EnvBody, request: Request) -> dict:
     require_session(request)
     require_csrf(request)
+    rate_limit(request, 5, window=60)  # max 5 env writes/min
     if not require_reauth(request, body.password):
         raise HTTPException(403, "Reauthentication failed")
     res = config_service.write_env(body.values)
@@ -85,6 +88,7 @@ def restart(body: RestartBody, request: Request) -> dict:
     from ..services import runtime_service
     require_session(request)
     require_csrf(request)
+    rate_limit(request, 3, window=60)  # max 3 restarts/min
     if not require_reauth(request, body.password):
         raise HTTPException(403, "Reauthentication failed")
     res = runtime_service.action("restart")

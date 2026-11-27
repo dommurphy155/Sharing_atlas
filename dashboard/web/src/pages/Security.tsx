@@ -1,14 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
-import {
-  Card,
-  PageHead,
-  Badge,
-  Empty,
-  KV,
-  Modal,
-  ago,
-} from "../components/ui";
+import { Card, PageHead, Badge, Empty, KV, Modal, ago } from "../components/ui";
 import { useToast } from "../components/Toast";
 
 export default function Security() {
@@ -37,7 +29,9 @@ export default function Security() {
     try {
       if (modal === "password") {
         const r = await api.changePassword(cur, next);
-        toast(`Password changed — ${r.revoked_sessions} other sessions revoked`);
+        toast(
+          `Password changed — ${r.revoked_sessions} other sessions revoked`,
+        );
       } else {
         const r = await api.revokeSessions();
         toast(`Revoked ${r.revoked} session(s)`);
@@ -62,6 +56,7 @@ export default function Security() {
   if (!d) return <div className="skeleton" style={{ height: 420 }} />;
 
   const current = d.current;
+  const chainOk = d.audit_chain_ok !== false;
 
   return (
     <>
@@ -93,7 +88,10 @@ export default function Security() {
       />
 
       <div className="grid grid-2">
-        <Card title="Active sessions" sub={`${d.sessions.filter((s: any) => !s.revoked).length} live`}>
+        <Card
+          title="Active sessions"
+          sub={`${d.sessions.filter((s: any) => !s.revoked).length} live`}
+        >
           {d.sessions.length ? (
             <table className="table">
               <thead>
@@ -115,10 +113,15 @@ export default function Security() {
                         </span>
                       )}
                     </td>
-                    <td className="mono" style={{ fontSize: 11, color: "var(--text-3)" }}>
+                    <td
+                      className="mono"
+                      style={{ fontSize: 11, color: "var(--text-3)" }}
+                    >
                       {s.ip || "—"}
                     </td>
-                    <td style={{ color: "var(--text-3)" }}>{ago(s.last_seen)}</td>
+                    <td style={{ color: "var(--text-3)" }}>
+                      {ago(s.last_seen)}
+                    </td>
                     <td>
                       <Badge tone={s.revoked ? "bad" : "ok"}>
                         {s.revoked ? "revoked" : "active"}
@@ -140,7 +143,10 @@ export default function Security() {
               ["Password hashing", "argon2id"],
               ["Session cookie", "HttpOnly · SameSite=Strict"],
               ["CSRF", "double-submit token"],
-              ["Login throttle", "5 attempts / 5 min / IP"],
+              ["Login throttle", "exponential (5→15m, 10→1h, 20→24h)"],
+              ["Max sessions", "5 concurrent"],
+              ["Password history", "last 5 rejected"],
+              ["Audit chain", chainOk ? "verified ✓" : "BROKEN"],
               ["Setup", "closed (admin exists)"],
             ]}
           />
@@ -151,7 +157,16 @@ export default function Security() {
         </Card>
       </div>
 
-      <Card title="Audit trail" sub="administrative events" style={{ marginTop: 12 }}>
+      <Card
+        title="Audit trail"
+        sub="administrative events · HMAC-chained"
+        style={{ marginTop: 12 }}
+      >
+        {!chainOk && (
+          <div className="form-error" style={{ marginBottom: 12 }}>
+            ⚠ Audit chain integrity check FAILED — possible tampering detected.
+          </div>
+        )}
         {d.audit?.length ? (
           <div className="table-wrap" style={{ maxHeight: 420 }}>
             <table className="table">
@@ -167,14 +182,19 @@ export default function Security() {
               <tbody>
                 {d.audit.map((a: any, i: number) => (
                   <tr key={i}>
-                    <td className="mono" style={{ fontSize: 11, color: "var(--text-3)" }}>
+                    <td
+                      className="mono"
+                      style={{ fontSize: 11, color: "var(--text-3)" }}
+                    >
                       {new Date(a.ts * 1000).toLocaleString()}
                     </td>
                     <td>
                       <span
                         style={{
                           textTransform: "capitalize",
-                          color: a.event.includes("fail") ? "var(--bad)" : undefined,
+                          color: a.event.includes("fail")
+                            ? "var(--bad)"
+                            : undefined,
                         }}
                       >
                         {a.event.replace(/_/g, " ")}
@@ -183,7 +203,10 @@ export default function Security() {
                     <td className="mono" style={{ fontSize: 11 }}>
                       {a.actor || "—"}
                     </td>
-                    <td className="mono" style={{ fontSize: 11, color: "var(--text-3)" }}>
+                    <td
+                      className="mono"
+                      style={{ fontSize: 11, color: "var(--text-3)" }}
+                    >
                       {a.ip || "—"}
                     </td>
                     <td style={{ color: "var(--text-3)", fontSize: 11 }}>
@@ -201,7 +224,9 @@ export default function Security() {
 
       {modal && (
         <Modal
-          title={modal === "password" ? "Change password" : "Revoke other sessions"}
+          title={
+            modal === "password" ? "Change password" : "Revoke other sessions"
+          }
           onClose={() => setModal(null)}
           actions={
             <>
@@ -243,8 +268,8 @@ export default function Security() {
                   autoComplete="new-password"
                 />
                 <div className="hint">
-                  12+ characters with upper, lower, number and symbol. Other
-                  sessions are revoked.
+                  12+ characters with upper, lower, number and symbol. Cannot
+                  reuse last 5 passwords. Other sessions are revoked.
                 </div>
               </div>
             </>

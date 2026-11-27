@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 
-from ..deps import require_session, require_csrf, require_reauth, client_ip
+from ..deps import require_session, require_csrf, require_reauth, client_ip, rate_limit
 from ..services import key_service, proxy_client, analytics_service
 from .. import security
 
@@ -46,8 +46,9 @@ class ImportBody(BaseModel):
 
 @router.post("/keys/import")
 def import_keys(body: ImportBody, request: Request) -> dict:
-    sess = require_session(request)
+    require_session(request)
     require_csrf(request)
+    rate_limit(request, 10, window=60)  # max 10 imports/min
     if not require_reauth(request, body.password):
         raise HTTPException(403, "Reauthentication failed")
     result = key_service.import_keys(body.keys)
@@ -65,6 +66,7 @@ class RemoveBody(BaseModel):
 def remove_key(body: RemoveBody, request: Request) -> dict:
     require_session(request)
     require_csrf(request)
+    rate_limit(request, 20, window=60)  # max 20 removals/min
     if not require_reauth(request, body.password):
         raise HTTPException(403, "Reauthentication failed")
     ok = key_service.remove_key(body.fingerprint)
@@ -84,6 +86,7 @@ class ToggleBody(BaseModel):
 def toggle_key(body: ToggleBody, request: Request) -> dict:
     require_session(request)
     require_csrf(request)
+    rate_limit(request, 30, window=60)  # max 30 toggles/min
     if not require_reauth(request, body.password):
         raise HTTPException(403, "Reauthentication failed")
     ok = key_service.set_enabled(body.fingerprint, body.enabled)
@@ -105,6 +108,7 @@ class BulkBody(BaseModel):
 def bulk_toggle(body: BulkBody, request: Request) -> dict:
     require_session(request)
     require_csrf(request)
+    rate_limit(request, 5, window=60)  # max 5 bulk ops/min
     if not require_reauth(request, body.password):
         raise HTTPException(403, "Reauthentication failed")
     changed = sum(1 for fp in body.fingerprints

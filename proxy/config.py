@@ -557,7 +557,7 @@ def reload_system_prompt_override() -> str:
 # CORS
 # ---------------------------------------------------------------------------
 CORS_ORIGINS: List[str] = [
-    o.strip() for o in _env("CORS_ORIGINS", "*").split(",") if o.strip()
+    o.strip() for o in _env("CORS_ORIGINS", "http://127.0.0.1:8080,http://localhost:8080").split(",") if o.strip() and o.strip() != "*"
 ]
 
 

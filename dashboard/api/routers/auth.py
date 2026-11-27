@@ -7,8 +7,10 @@ from fastapi import APIRouter, Request, Response, HTTPException
 from pydantic import BaseModel
 
 from .. import security
-from ..config import SESSION_COOKIE, SESSION_ABSOLUTE_SECONDS, PUBLIC_TLS
-from ..deps import client_ip, require_session, require_csrf, CSRF_COOKIE
+from ..config import (
+    PUBLIC_TLS, RATE_LIMIT_LOGIN, SESSION_ABSOLUTE_SECONDS, SESSION_COOKIE,
+)
+from ..deps import CSRF_COOKIE, client_ip, rate_limit, require_session
 
 router = APIRouter(prefix="/api", tags=["auth"])
 
@@ -16,7 +18,7 @@ COOKIE_SECURE = PUBLIC_TLS  # Secure flag when served over TLS
 
 
 # ---------------------------------------------------------------------------
-# Status
+# Status (public — used to determine setup vs login vs app)
 # ---------------------------------------------------------------------------
 @router.get("/auth/status")
 def auth_status(request: Request) -> dict:
@@ -34,6 +36,7 @@ def auth_status(request: Request) -> dict:
 # ---------------------------------------------------------------------------
 # First-run setup — password only, no token, no username, no TOTP.
 # If no admin exists, the first password set becomes the admin password.
+# Protected by rate limiting to prevent brute-forcing the setup window.
 # ---------------------------------------------------------------------------
 class SetupComplete(BaseModel):
     password: str
@@ -41,6 +44,9 @@ class SetupComplete(BaseModel):
 
 @router.post("/setup/complete")
 def setup_complete(body: SetupComplete, request: Request) -> dict:
+    # Rate limit setup attempts (prevent brute-forcing first-run)
+    rate_limit(request, 3, window=60)
+
     if security.admin_exists():
         raise HTTPException(410, "Already configured")
     ok, msg = security.password_strength_ok(body.password)
@@ -64,18 +70,38 @@ class LoginBody(BaseModel):
 @router.post("/auth/login")
 def login(body: LoginBody, request: Request, response: Response) -> dict:
     ip = client_ip(request)
-    if security.login_locked(ip):
-        raise HTTPException(429, "Too many attempts. Try again later.")
+
+    # Rate limiting (stricter than lockout — per-IP, per-minute)
+    rate_limit(request, RATE_LIMIT_LOGIN, window=60)
+
+    # Exponential lockout
+    remaining = security.lockout_remaining(ip)
+    if remaining > 0:
+        raise HTTPException(
+            429,
+            "Too many attempts. Try again later.",
+            headers={"Retry-After": str(remaining)},
+        )
+
     admin = security.get_admin()
     if not admin:
         raise HTTPException(409, "Not configured")
-    ok = security.verify_password(body.password, admin["password_hash"])
+
+    ok, new_hash = security.verify_password(body.password, admin["password_hash"])
     security.record_login(ip, "", ok)
     if not ok:
         security.audit("login_failed", "", ip)
         raise HTTPException(401, "Invalid credentials")
 
-    # rotate: revoke old cookie's session if any, mint fresh
+    # Upgrade hash if params changed
+    if new_hash:
+        from .. import db
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE admin SET password_hash = ? WHERE id = 1", (new_hash,)
+            )
+
+    # Rotate: revoke old cookie's session if any, mint fresh
     old = request.cookies.get(SESSION_COOKIE)
     if old:
         security.revoke_session(old)
@@ -100,12 +126,13 @@ def logout(request: Request, response: Response) -> dict:
 @router.get("/auth/me")
 def me(request: Request) -> dict:
     sess = require_session(request)
-    sid = request.cookies.get(SESSION_COOKIE)
     admin = security.get_admin() or {}
     return {
         "username": admin.get("username", "admin"),
-        "session_id": sid[:8] if sid else "",
-        "session": {k: sess[k] for k in ("created_at", "expires_at", "ip") if k in sess},
+        # session_id intentionally omitted — no info leak to frontend
+        "session": {
+            k: sess[k] for k in ("created_at", "expires_at", "ip") if k in sess
+        },
         "csrf_token": request.cookies.get(CSRF_COOKIE, ""),
     }
 
