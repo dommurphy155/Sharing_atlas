@@ -5,11 +5,12 @@ is launched as a detached child of this process (Windows: new process group;
 POSIX: new session) and then polled over loopback HTTP until it answers.
 
 Passwords are read with ``getpass`` so they are never echoed and never land in
-the process list, shell history, or this process's argv.
+shell history. They are handed to the setup child on stdin, never as an argv
+element: argv is world-readable via ``ps`` and ``/proc/<pid>/cmdline``, while
+stdin is not.
 """
 from __future__ import annotations
 
-import getpass
 import os
 import socket
 import subprocess
@@ -105,12 +106,14 @@ def _create_admin(repo: Path, venv_py: Path, password: str) -> tuple[bool, str]:
         f"sys.path.insert(0, {str(repo)!r})\n"
         "from dashboard.api import db, security\n"
         "db.init_db()\n"
-        "ok, msg = security.create_admin('admin', sys.argv[1])\n"
+        "pw = sys.stdin.readline().rstrip('\\n')\n"
+        "ok, msg = security.create_admin('admin', pw)\n"
         "print('OK' if ok else 'ERR:' + msg)\n"
     )
     try:
         p = subprocess.run(
-            [str(venv_py), "-c", code, password],
+            [str(venv_py), "-c", code],
+            input=password + "\n",
             capture_output=True, text=True, timeout=120, cwd=str(repo),
         )
     except (OSError, subprocess.TimeoutExpired) as e:
