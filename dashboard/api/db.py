@@ -131,6 +131,28 @@ def connect() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+@contextmanager
+def write_lock() -> Iterator[sqlite3.Connection]:
+    """Serialize a read-check-write sequence against other writers.
+
+    A plain connect() only takes its lock at the first write, so a caller that
+    reads a counter, decides, then inserts can race another caller doing the
+    same. BEGIN IMMEDIATE takes the write lock up front, making the whole
+    sequence atomic. Readers are unaffected (WAL).
+    """
+    conn = sqlite3.connect(str(DB_PATH), timeout=10, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        yield conn
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def harden_permissions() -> None:
     """Restrict the DB, WAL, SHM, and its directory to the owner.
 

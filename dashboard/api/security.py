@@ -270,25 +270,34 @@ def generate_recovery_codes(count: int = 10) -> list[str]:
 
 
 def verify_recovery_code(code: str) -> bool:
-    """Verify and consume a recovery code. Returns True if valid."""
+    """Verify and consume a recovery code. Returns True if valid.
+
+    Standalone entry point; the throttled path uses _verify_recovery_code so
+    the check and the consumption share one transaction.
+    """
+    with db.connect() as conn:
+        return _verify_recovery_code(conn, code)
+
+
+def _verify_recovery_code(conn, code: str) -> bool:
+    """Verify and consume a code on an already-open connection."""
     import bcrypt
     normalized = code.strip().upper().replace(" ", "").replace("-", "")
-    with db.connect() as conn:
-        rows = conn.execute(
-            "SELECT id, code_hash FROM recovery_code WHERE used = 0"
-        ).fetchall()
-        for row in rows:
-            # bcrypt hash is of the formatted version
-            for fmt in (code.strip().upper(), normalized):
-                try:
-                    if bcrypt.checkpw(fmt.encode(), row["code_hash"].encode()):
-                        conn.execute(
-                            "UPDATE recovery_code SET used = 1 WHERE id = ?",
-                            (row["id"],),
-                        )
-                        return True
-                except Exception:
-                    continue
+    rows = conn.execute(
+        "SELECT id, code_hash FROM recovery_code WHERE used = 0"
+    ).fetchall()
+    for row in rows:
+        # bcrypt hash is of the formatted version
+        for fmt in (code.strip().upper(), normalized):
+            try:
+                if bcrypt.checkpw(fmt.encode(), row["code_hash"].encode()):
+                    conn.execute(
+                        "UPDATE recovery_code SET used = 1 WHERE id = ?",
+                        (row["id"],),
+                    )
+                    return True
+            except Exception:
+                continue
     return False
 
 
@@ -577,18 +586,6 @@ def lockout_remaining(ip: str) -> int:
 # ---------------------------------------------------------------------------
 # Recovery-code throttling (independent of the login lockout budget)
 # ---------------------------------------------------------------------------
-def record_recovery_attempt(ip: str, ok: bool) -> None:
-    """Log a recovery-code attempt without touching the login lockout."""
-    with db.connect() as conn:
-        conn.execute(
-            "INSERT INTO recovery_attempt (ts, ip, ok) VALUES (?,?,?)",
-            (db.now(), ip, 1 if ok else 0),
-        )
-        conn.execute(
-            "DELETE FROM recovery_attempt WHERE ts < ?", (db.now() - 3600,)
-        )
-
-
 def recovery_lockout_remaining(ip: str) -> int:
     """Seconds left before this IP may try another recovery code."""
     ts = db.now()
@@ -630,12 +627,41 @@ def check_recovery_code(code: str, ip: str) -> bool:
     Every caller — login fallback or the standalone verify endpoint — goes
     through here, so no path can verify a code without being throttled and
     recorded. Raises RecoveryThrottled when the IP is locked out.
+
+    The lockout check, the code consumption and the attempt record all happen
+    inside one BEGIN IMMEDIATE transaction, so concurrent requests cannot all
+    observe remaining == 0 and slip past the gate, and a code cannot be
+    redeemed twice.
     """
-    remaining = recovery_lockout_remaining(ip)
-    if remaining > 0:
-        raise RecoveryThrottled(remaining)
-    ok = bool(code) and verify_recovery_code(code)
-    record_recovery_attempt(ip, ok)
+    ts = db.now()
+    with db.write_lock() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM recovery_attempt "
+            "WHERE ip = ? AND ts > ? AND ok = 0",
+            (ip, ts - 3600),
+        ).fetchone()
+        fail_count = row["n"] or 0
+        lockout = _lockout_duration(fail_count)
+        remaining = 0
+        if lockout:
+            last_fail = conn.execute(
+                "SELECT ts FROM recovery_attempt WHERE ip = ? AND ok = 0 "
+                "ORDER BY ts DESC LIMIT 1",
+                (ip,),
+            ).fetchone()
+            if last_fail:
+                elapsed = ts - last_fail["ts"]
+                if elapsed < lockout:
+                    remaining = lockout - elapsed
+        if remaining > 0:
+            raise RecoveryThrottled(remaining)
+
+        ok = bool(code) and _verify_recovery_code(conn, code)
+        conn.execute(
+            "INSERT INTO recovery_attempt (ts, ip, ok) VALUES (?,?,?)",
+            (ts, ip, 1 if ok else 0),
+        )
+        conn.execute("DELETE FROM recovery_attempt WHERE ts < ?", (ts - 3600,))
     return ok
 
 

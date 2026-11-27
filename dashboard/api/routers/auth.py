@@ -94,21 +94,17 @@ def login(body: LoginBody, request: Request, response: Response) -> dict:
     # Rate limiting (stricter than lockout — per-IP, per-minute)
     rate_limit(request, RATE_LIMIT_LOGIN, window=60)
 
-    # Exponential lockout. The recovery-code budget is separate, so a failed
-    # 2FA attempt cannot be used to lock the password login out (or vice versa).
+    # Exponential lockout for password attempts. The recovery-code budget is
+    # deliberately NOT pre-checked here: an attacker who never presents a
+    # recovery code must not be able to deny password login. The budget is
+    # enforced inside check_recovery_code, which only runs when a code is
+    # actually presented.
     remaining = security.lockout_remaining(ip)
     if remaining > 0:
         raise HTTPException(
             429,
             "Too many attempts. Try again later.",
             headers={"Retry-After": str(remaining)},
-        )
-    recovery_remaining = security.recovery_lockout_remaining(ip)
-    if recovery_remaining > 0:
-        raise HTTPException(
-            429,
-            "Too many attempts. Try again later.",
-            headers={"Retry-After": str(recovery_remaining)},
         )
 
     admin = security.get_admin()
