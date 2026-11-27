@@ -49,6 +49,89 @@ def _intro() -> None:
     CONSOLE.print(Panel(Text.from_markup(body), title=title, border_style="cyan"))
 
 
+def _create_dashboard_admin(repo: Path, venv_py: Path) -> bool:
+    """Create the dashboard admin account during wizard.
+
+    Returns True if admin was created or already exists, False on failure/cancel.
+    """
+    import sys
+    from rich.prompt import Prompt, Confirm
+    import getpass
+
+    # Check if admin already exists
+    try:
+        sys.path.insert(0, str(repo))
+        from dashboard.api import db, security
+        db.init_db()
+        if security.admin_exists():
+            CONSOLE.print("[yellow]Dashboard admin already exists — keeping it.[/yellow]")
+            return True
+    except Exception as e:
+        CONSOLE.print(f"[red]✘ Could not check admin: {e}[/red]")
+        return False
+    finally:
+        try:
+            sys.path.remove(str(repo))
+        except ValueError:
+            pass
+
+    CONSOLE.print("\n[cyan]Set the dashboard admin password.[/cyan]")
+    CONSOLE.print("  [dim]12+ characters, upper, lower, number and symbol.[/dim]")
+
+    def _read_password(prompt: str) -> str:
+        """Read password with getpass, fallback to Prompt."""
+        if sys.stdin.isatty():
+            try:
+                return getpass.getpass(prompt)
+            except (EOFError, OSError, Exception):
+                pass
+        return Prompt.ask(prompt, password=True)
+
+    pw1 = _read_password("  Password: ")
+    if not pw1:
+        CONSOLE.print("[red]No password entered — skipping dashboard admin.[/red]")
+        return False
+    if len(pw1) < 12:
+        CONSOLE.print("[red]Password must be at least 12 characters.[/red]")
+        return False
+
+    pw2 = _read_password("  Confirm:  ")
+    if pw1 != pw2:
+        CONSOLE.print("[red]Passwords did not match — skipping dashboard admin.[/red]")
+        return False
+
+    # Validate strength
+    try:
+        sys.path.insert(0, str(repo))
+        from dashboard.api.security import password_strength_ok
+        ok, msg = password_strength_ok(pw1)
+    except Exception:
+        ok, msg = True, "ok"
+    finally:
+        try:
+            sys.path.remove(str(repo))
+        except ValueError:
+            pass
+
+    if not ok:
+        CONSOLE.print(f"[red]✘ {msg}[/red]")
+        return False
+
+    # Create admin
+    try:
+        ok, msg = dash._create_admin(repo, venv_py, pw1)
+    except Exception as e:
+        CONSOLE.print(f"[red]✘ Could not create admin: {e}[/red]")
+        return False
+
+    if not ok:
+        CONSOLE.print(f"[red]✘ Could not create admin: {msg}[/red]")
+        return False
+
+    CONSOLE.print("[green]✓[/green] Dashboard admin created")
+    return True
+
+
 def _collect_keys(repo: Path) -> list[str]:
     """Prompt the user for OpenRouter API keys. Returns the full key list."""
     # Preserve existing keys on every platform; collection handles additions.
@@ -386,7 +469,7 @@ def run_wizard(repo: Path, venv_py: Path) -> int:
             CONSOLE.print(f"  Log tail: {log.read_text(encoding='utf-8', errors='replace')[-500:]}", markup=False, highlight=False)
         return 1
 
-    # ---- Step 5: Optional CLI shim ----
+    # ---- Step 4: Optional CLI shim ----
     CONSOLE.print("\n[cyan]Optional: install `atlas` CLI?[/cyan]")
     CONSOLE.print("  This lets you run `atlas status`, `atlas stop`, `atlas start` later.")
     shim_ok: bool | None = None
@@ -410,8 +493,11 @@ def run_wizard(repo: Path, venv_py: Path) -> int:
         CONSOLE.print("[dim]  Skipped; proxy management still works via the runtime "
                       "and the venv python.[/dim]")
 
+    # ---- Step 5: Optional dashboard admin ----
+    dash_admin_created = _create_dashboard_admin(repo, venv_py)
+
     # ---- Step 5b: Optional dashboard ----
-    dash_result = _dashboard_section(repo, venv_py)
+    dash_result = _dashboard_section(repo, venv_py) if dash_admin_created else {"wanted": False, "ok": False, "detail": "skipped (no admin)"}
 
     # ---- Step 6: Summary + exit ----
     _show_summary(repo, added, total, True, message, shim_ok, shim_msg, dash_result)

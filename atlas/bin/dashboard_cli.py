@@ -77,6 +77,26 @@ def _running() -> bool:
     return False
 
 
+def cmd_setup_token(args) -> int:
+    """Mint a one-time setup token for first-run admin creation.
+
+    Printed to the local terminal only, valid for a short window, single use.
+    """
+    def _run():
+        from dashboard.api import db, security
+        db.init_db()
+        if security.admin_exists():
+            return None, "The dashboard already has an administrator."
+        return security.mint_setup_token(), ""
+
+    token, err = _with_path(_run)
+    if err:
+        CONSOLE.print(f"[yellow]{err}[/yellow]")
+        return 0
+    CONSOLE.print("[bold]Setup token[/bold] (valid 15 minutes, single use):")
+    CONSOLE.print(f"  [green]{token}[/green]")
+    CONSOLE.print("[dim]Post it to /api/setup/complete with your chosen password.[/dim]")
+    return 0
 
 
 def cmd_start(args) -> int:
@@ -339,6 +359,7 @@ DASHBOARD_SUBCOMMANDS = {
     "restart": cmd_restart,
     "status": cmd_status,
     "logs": cmd_logs,
+    "setup-token": cmd_setup_token,
     "change-password": cmd_change_password,
     "change-port": cmd_change_port,
     "set-port": cmd_change_port,
@@ -348,7 +369,7 @@ DASHBOARD_SUBCOMMANDS = {
 def dispatch(args) -> int:
     sub = getattr(args, "dashboard_command", None)
     if not sub:
-        CONSOLE.print("[bold]atlas dashboard[/bold] <start|stop|restart|status|logs>")
+        CONSOLE.print("[bold]atlas dashboard[/bold] <start|stop|restart|status|logs|setup-token|change-password|change-port>")
         return 0
     handler = DASHBOARD_SUBCOMMANDS.get(sub)
     if not handler:
