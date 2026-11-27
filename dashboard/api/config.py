@@ -34,10 +34,6 @@ SESSION_ABSOLUTE_SECONDS = int(os.environ.get("DASHBOARD_SESSION_ABS", "43200"))
 # Setup token
 SETUP_TOKEN_TTL_SECONDS = int(os.environ.get("DASHBOARD_SETUP_TTL", "900"))       # 15 min
 
-# Login rate limit
-LOGIN_MAX_ATTEMPTS = int(os.environ.get("DASHBOARD_LOGIN_MAX", "5"))
-LOGIN_WINDOW_SECONDS = int(os.environ.get("DASHBOARD_LOGIN_WINDOW", "300"))
-
 # Frontend dist (served when built) — enables single-process prod deploy.
 WEB_DIST = Path(os.environ.get("DASHBOARD_WEB_DIST", str(REPO_ROOT / "dashboard" / "web" / "dist")))
 
