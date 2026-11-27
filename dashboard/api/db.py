@@ -92,6 +92,16 @@ CREATE TABLE IF NOT EXISTS rate_limit (
     window_start  INTEGER NOT NULL,
     count         INTEGER NOT NULL DEFAULT 0
 );
+
+-- Recovery-code attempts. Kept separate from login_attempt on purpose:
+-- a failed recovery redemption must not consume the login lockout budget,
+-- and a successful one must not be recorded as a failure.
+CREATE TABLE IF NOT EXISTS recovery_attempt (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            INTEGER NOT NULL,
+    ip            TEXT NOT NULL,
+    ok            INTEGER NOT NULL DEFAULT 0
+);
 """
 
 

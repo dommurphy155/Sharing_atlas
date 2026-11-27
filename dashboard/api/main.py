@@ -240,8 +240,13 @@ def _startup() -> None:
     log_service.poll()
     analytics_service.start_sampler()
 
-    # Warn if security keys not set (dev mode)
-    from .config import AUDIT_HMAC_KEY, TOTP_ENCRYPTION_KEY
+    from . import security
+    from .config import AUDIT_HMAC_KEY, PUBLIC_TLS, TOTP_ENCRYPTION_KEY
+
+    # Anchor any audit rows that predate the external anchor, so the first
+    # verification after an upgrade has something to compare against.
+    security.anchor_audit_chain()
+
     if not TOTP_ENCRYPTION_KEY:
         import logging
         logging.warning(
@@ -250,9 +255,17 @@ def _startup() -> None:
         )
     if not AUDIT_HMAC_KEY:
         import logging
+        if PUBLIC_TLS:
+            # Fail closed: a tamper-evident audit log is a hard requirement
+            # for a publicly reachable admin surface.
+            raise RuntimeError(
+                "DASHBOARD_AUDIT_HMAC_KEY is not set but DASHBOARD_PUBLIC_TLS "
+                "is enabled. Refusing to start without a tamper-evident audit "
+                "chain; set a 32-byte key or disable public access."
+            )
         logging.warning(
             "DASHBOARD_AUDIT_HMAC_KEY not set — audit chain not tamper-evident. "
-            "Set a 32-byte key for production."
+            "Set a 32-byte key before exposing this instance."
         )
 
 

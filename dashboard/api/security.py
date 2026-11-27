@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import time
@@ -16,6 +17,7 @@ from typing import Optional
 from . import db
 from .config import (
     AUDIT_HMAC_KEY,
+    DATA_DIR,
     LOCKOUT_LEVEL_COUNTS,
     LOCKOUT_THRESHOLDS,
     MAX_CONCURRENT_SESSIONS,
@@ -26,6 +28,11 @@ from .config import (
     TOTP_ENCRYPTION_KEY,
     TOTP_WINDOW,
 )
+
+# External anchor for the audit HMAC chain. Lives outside the SQLite file so
+# that an attacker with write access to the DB cannot truncate the tail and
+# re-forge a consistent chain without also touching this file.
+AUDIT_ANCHOR_PATH = DATA_DIR / "audit_anchor.json"
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +215,8 @@ def create_admin(username: str, password: str, totp_secret: str | None = None,
             (username, hash_password(password), encrypted_totp,
              1 if totp_secret else 0, ts, ts),
         )
-        audit("admin_created", username, ip, "initial administrator provisioned")
+        _queue_audit("admin_created", username, ip, "initial administrator provisioned")
+    flush_pending_audit()
     return True, "ok"
 
 
@@ -358,6 +366,11 @@ def list_sessions() -> list[dict]:
 # ---------------------------------------------------------------------------
 # Audit (HMAC-chained for tamper evidence)
 # ---------------------------------------------------------------------------
+def audit_chain_configured() -> bool:
+    """True when a key is present, so the chain can actually be verified."""
+    return bool(AUDIT_HMAC_KEY)
+
+
 def _audit_hmac(prev_hmac: str, event: str, actor: str, ip: str, detail: str, ts: int) -> str:
     if not AUDIT_HMAC_KEY:
         return ""
@@ -365,36 +378,111 @@ def _audit_hmac(prev_hmac: str, event: str, actor: str, ip: str, detail: str, ts
     return hmac.new(AUDIT_HMAC_KEY, msg, "sha256").hexdigest()
 
 
+def _load_anchor() -> dict:
+    """Read the external chain anchor. Missing/corrupt anchor = no anchor."""
+    try:
+        return json.loads(AUDIT_ANCHOR_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_anchor(last_id: int, last_hmac: str) -> None:
+    """Persist the chain head outside the DB, owner-only."""
+    try:
+        AUDIT_ANCHOR_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = AUDIT_ANCHOR_PATH.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps({"last_id": last_id, "last_hmac": last_hmac}),
+            encoding="utf-8",
+        )
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, AUDIT_ANCHOR_PATH)
+    except OSError:
+        # An unwritable anchor degrades detection but must not stop auditing.
+        pass
+
+
+# Events queued by a helper that is itself inside a write transaction. The
+# audit insert would otherwise deadlock on the same SQLite connection, so the
+# caller flushes them once its own transaction has committed.
+_PENDING_AUDIT: list[tuple[str, str, str, str]] = []
+
+
+def _queue_audit(event: str, actor: str, ip: str, detail: str) -> None:
+    _PENDING_AUDIT.append((event, actor, ip, detail))
+
+
+def flush_pending_audit() -> None:
+    """Write any events queued inside a transaction, then clear the queue."""
+    pending, _PENDING_AUDIT[:] = list(_PENDING_AUDIT), []
+    for event, actor, ip, detail in pending:
+        audit(event, actor, ip, detail)
+
+
+def anchor_audit_chain() -> None:
+    """Record the current chain head externally if no anchor exists yet.
+
+    Called at startup so rows written before the anchor file existed (or after
+    it was lost) become the trusted baseline rather than a verification failure.
+    """
+    if _load_anchor():
+        return
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT id, hmac FROM audit_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if row:
+        _save_anchor(row["id"], row["hmac"] or "")
+
+
 def audit(event: str, actor: str = "", ip: str = "", detail: str = "") -> None:
     ts = db.now()
     with db.connect() as conn:
         last = conn.execute(
-            "SELECT hmac FROM audit_log ORDER BY id DESC LIMIT 1"
+            "SELECT id, hmac FROM audit_log ORDER BY id DESC LIMIT 1"
         ).fetchone()
         prev = last["hmac"] if last and last["hmac"] else ""
         chain = _audit_hmac(prev, event, actor, ip, detail, ts)
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO audit_log (ts, event, actor, ip, detail, hmac) VALUES (?,?,?,?,?,?)",
             (ts, event, actor, ip, detail, chain),
         )
+        new_id = cur.lastrowid or 0
+    _save_anchor(new_id, chain)
 
 
-def verify_audit_chain() -> tuple[bool, int]:
-    """Verify HMAC chain integrity. Returns (ok, broken_at_id)."""
+def verify_audit_chain() -> tuple[bool, int, str]:
+    """Verify the HMAC chain.
+
+    Returns (ok, broken_at_id, state) where state is "ok", "unconfigured"
+    (no key — cannot be verified, fail closed) or "broken".
+    """
     if not AUDIT_HMAC_KEY:
-        return True, 0  # no key = no chain
+        return False, 0, "unconfigured"
     with db.connect() as conn:
         rows = conn.execute(
             "SELECT id, ts, event, actor, ip, detail, hmac FROM audit_log ORDER BY id"
         ).fetchall()
+
     prev = ""
     for row in rows:
         expected = _audit_hmac(prev, row["event"] or "", row["actor"] or "",
                                row["ip"] or "", row["detail"] or "", row["ts"])
         if not hmac.compare_digest(expected, row["hmac"] or ""):
-            return False, row["id"]
+            return False, row["id"], "broken"
         prev = row["hmac"] or ""
-    return True, 0
+
+    # Anchor check: the DB must not have been truncated past the last head we
+    # recorded externally.
+    anchor = _load_anchor()
+    anchor_id = anchor.get("last_id")
+    anchor_hmac = anchor.get("last_hmac")
+    if anchor_id is not None and anchor_hmac is not None:
+        if not rows or rows[-1]["id"] != anchor_id:
+            return False, rows[-1]["id"] if rows else 0, "broken"
+        if not hmac.compare_digest(rows[-1]["hmac"] or "", anchor_hmac):
+            return False, rows[-1]["id"], "broken"
+    return True, 0, "ok"
 
 
 def recent_audit(limit: int = 50) -> list[dict]:
@@ -455,6 +543,48 @@ def lockout_remaining(ip: str) -> int:
         # Check if currently locked
         last_fail = conn.execute(
             "SELECT ts FROM login_attempt WHERE ip = ? AND ok = 0 "
+            "ORDER BY ts DESC LIMIT 1",
+            (ip,),
+        ).fetchone()
+        if last_fail:
+            elapsed = ts - last_fail["ts"]
+            if elapsed < lockout:
+                return lockout - elapsed
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Recovery-code throttling (independent of the login lockout budget)
+# ---------------------------------------------------------------------------
+def record_recovery_attempt(ip: str, ok: bool) -> None:
+    """Log a recovery-code attempt without touching the login lockout."""
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO recovery_attempt (ts, ip, ok) VALUES (?,?,?)",
+            (db.now(), ip, 1 if ok else 0),
+        )
+        conn.execute(
+            "DELETE FROM recovery_attempt WHERE ts < ?", (db.now() - 3600,)
+        )
+
+
+def recovery_lockout_remaining(ip: str) -> int:
+    """Seconds left before this IP may try another recovery code."""
+    ts = db.now()
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM recovery_attempt "
+            "WHERE ip = ? AND ts > ? AND ok = 0",
+            (ip, ts - 3600),
+        ).fetchone()
+        fail_count = row["n"] or 0
+        if fail_count == 0:
+            return 0
+        lockout = _lockout_duration(fail_count)
+        if lockout == 0:
+            return 0
+        last_fail = conn.execute(
+            "SELECT ts FROM recovery_attempt WHERE ip = ? AND ok = 0 "
             "ORDER BY ts DESC LIMIT 1",
             (ip,),
         ).fetchone()

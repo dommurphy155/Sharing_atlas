@@ -57,6 +57,7 @@ export default function Security() {
 
   const current = d.current;
   const chainOk = d.audit_chain_ok !== false;
+  const chainUnconfigured = d.audit_chain_state === "unconfigured";
 
   return (
     <>
@@ -146,7 +147,14 @@ export default function Security() {
               ["Login throttle", "exponential (5→15m, 10→1h, 20→24h)"],
               ["Max sessions", "5 concurrent"],
               ["Password history", "last 5 rejected"],
-              ["Audit chain", chainOk ? "verified ✓" : "BROKEN"],
+              [
+                "Audit chain",
+                chainUnconfigured
+                  ? "UNCONFIGURED"
+                  : chainOk
+                    ? "verified ✓"
+                    : "BROKEN",
+              ],
               ["Setup", "closed (admin exists)"],
             ]}
           />
@@ -162,9 +170,11 @@ export default function Security() {
         sub="administrative events · HMAC-chained"
         style={{ marginTop: 12 }}
       >
-        {!chainOk && (
+        {(!chainOk || chainUnconfigured) && (
           <div className="form-error" style={{ marginBottom: 12 }}>
-            ⚠ Audit chain integrity check FAILED — possible tampering detected.
+            {!chainOk
+              ? "⚠ Audit chain integrity check FAILED — possible tampering detected."
+              : "⚠ Audit chain is not configured — set DASHBOARD_AUDIT_HMAC_KEY to make the log tamper-evident."}
           </div>
         )}
         {d.audit?.length ? (

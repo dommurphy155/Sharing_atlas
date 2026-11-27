@@ -65,6 +65,21 @@ def setup_complete(body: SetupComplete, request: Request) -> dict:
 # ---------------------------------------------------------------------------
 class LoginBody(BaseModel):
     password: str
+    # Required only when the admin has TOTP enabled; a recovery code is also
+    # accepted here so a lost device does not lock the account out.
+    code: str = ""
+    recovery_code: str = ""
+
+
+def _verify_second_factor(admin: dict, body: LoginBody) -> bool:
+    """Check the second factor. True when no factor is required or it passes."""
+    if not admin.get("totp_enabled"):
+        return True
+    if body.code and security.verify_totp(admin.get("totp_secret"), body.code):
+        return True
+    if body.recovery_code and security.verify_recovery_code(body.recovery_code):
+        return True
+    return False
 
 
 @router.post("/auth/login")
@@ -92,6 +107,16 @@ def login(body: LoginBody, request: Request, response: Response) -> dict:
     if not ok:
         security.audit("login_failed", "", ip)
         raise HTTPException(401, "Invalid credentials")
+
+    # Second factor — only reached with a correct password, so the response
+    # distinguishes "password wrong" (401) from "code required" (428).
+    if admin.get("totp_enabled") and not _verify_second_factor(admin, body):
+        security.audit("login_2fa_failed", admin["username"], ip)
+        raise HTTPException(
+            428,
+            "Second factor required",
+            headers={"X-2FA-Required": "totp"},
+        )
 
     # Upgrade hash if params changed
     if new_hash:

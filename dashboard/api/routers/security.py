@@ -19,13 +19,13 @@ router = APIRouter(prefix="/api", tags=["security"])
 @router.get("/security")
 def security_overview(request: Request) -> dict:
     require_session(request)
-    chain_ok, broken_at = security.verify_audit_chain()
-    admin = security.get_admin() or {}
+    chain_ok, broken_at, chain_state = security.verify_audit_chain()
     return {
         "sessions": security.list_sessions(),
         "audit": security.recent_audit(60),
         "current": request.cookies.get(SESSION_COOKIE, "")[:8],
         "audit_chain_ok": chain_ok,
+        "audit_chain_state": chain_state,
         "audit_chain_broken_at": broken_at if not chain_ok else None,
     }
 
@@ -190,8 +190,9 @@ def recovery_verify(body: RecoveryVerifyBody, request: Request) -> dict:
     # Aggressive rate limit: 3 attempts per minute per IP
     rate_limit(request, 3, window=60)
 
-    # Exponential lockout applies here too
-    remaining = security.lockout_remaining(ip)
+    # Independent lockout budget — recovery attempts must not consume the
+    # login lockout, and vice versa.
+    remaining = security.recovery_lockout_remaining(ip)
     if remaining > 0:
         raise HTTPException(
             429,
@@ -199,8 +200,11 @@ def recovery_verify(body: RecoveryVerifyBody, request: Request) -> dict:
             headers={"Retry-After": str(remaining)},
         )
 
-    security.record_login(ip, "", False)  # count toward lockout
-    if security.verify_recovery_code(body.code):
+    # Record the outcome only after checking, so a successful redemption is
+    # not counted as a failure.
+    ok = security.verify_recovery_code(body.code)
+    security.record_recovery_attempt(ip, ok)
+    if ok:
         security.audit("recovery_code_used", "", ip)
         return {"ok": True}
     security.audit("recovery_code_failed", "", ip)
@@ -213,5 +217,9 @@ def recovery_verify(body: RecoveryVerifyBody, request: Request) -> dict:
 @router.get("/security/audit/verify")
 def audit_verify(request: Request) -> dict:
     require_session(request)
-    ok, broken_at = security.verify_audit_chain()
-    return {"ok": ok, "broken_at": broken_at if not ok else None}
+    ok, broken_at, state = security.verify_audit_chain()
+    return {
+        "ok": ok,
+        "state": state,
+        "broken_at": broken_at if not ok else None,
+    }
