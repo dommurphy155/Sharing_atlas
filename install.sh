@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Atlas proxy installer — Linux & macOS.
 #
-# One-command setup: bootstrap → enter OpenRouter keys → start proxy → verify → exit.
+# One-command setup: bootstrap → enter OpenRouter keys → start proxy → verify
+# → optionally set a dashboard password and start the dashboard → exit.
 #
 # Usage:
 #   install.sh                 Interactive install

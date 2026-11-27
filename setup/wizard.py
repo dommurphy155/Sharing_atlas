@@ -6,7 +6,8 @@ Flow (one command):
     3. Start proxy — launch with a supervisor so it stays alive after exit
     4. Verify      — confirm /health is up and keys are loaded
     5. (Optional)  — install the `atlas` CLI shim for later stop/status
-    6. Exit        — report success, tell user how to stop
+    6. (Optional)  — set the dashboard password and start the dashboard
+    7. Exit        — report success, tell user how to stop
 
 No harness configuration. No provider choice (OpenRouter only). No extra steps.
 The proxy keeps running after setup finishes.
@@ -39,6 +40,8 @@ def _intro() -> None:
         "  2. Collect keys — enter your OpenRouter API key(s)\n"
         "  3. Start proxy — launch with a supervisor so it stays alive\n"
         "  4. Verify — confirm it's healthy, then exit\n\n"
+        "You'll then be offered the optional dashboard: set an admin password "
+        "and it starts alongside the proxy.\n\n"
         "No harness configuration. No extra steps. The proxy keeps running "
         "after setup finishes."
     )
@@ -155,7 +158,8 @@ def _start_and_verify(repo: Path, venv_py: Path, expected_keys: int
 def _show_summary(repo: Path, added: int, total: int,
                   started_ok: bool, message: str,
                   shim_ok: bool | None = None,
-                  shim_msg: str = "") -> None:
+                  shim_msg: str = "",
+                  dash: dict | None = None) -> None:
     tbl = Table(show_header=True, header_style="bold cyan",
                 box=None, padding=(0, 1))
     tbl.add_column("Step", style="bold")
@@ -191,12 +195,21 @@ def _show_summary(repo: Path, added: int, total: int,
         cli_style, cli_detail = "[red]✘[/red]", shim_msg
     tbl.add_row("CLI (`atlas`)", cli_style, cli_detail)
 
+    # Dashboard row: only shown when the user asked for it.
+    if dash and dash.get("wanted"):
+        if dash.get("ok"):
+            d_style, d_detail = "[green]✓[/green]", dash.get("detail", "")
+        else:
+            d_style, d_detail = "[red]✘[/red]", dash.get("detail", "failed")
+        tbl.add_row("Dashboard", d_style, d_detail)
+
     CONSOLE.print()
     CONSOLE.print(tbl)
 
 
 def _show_exit(repo: Path, started_ok: bool,
-               shim_ok: bool | None = None) -> None:
+               shim_ok: bool | None = None,
+               dash: dict | None = None) -> None:
     port = core.proxy_port(repo)
     if started_ok:
         CONSOLE.print(f"\n[green]✓ Setup complete![/green]")
@@ -221,11 +234,123 @@ def _show_exit(repo: Path, started_ok: bool,
                 CONSOLE.print(f"    kill $(cat {core.pid_file(repo)})")
             CONSOLE.print(f"\n  CLI not on PATH — invoke it directly:")
             CONSOLE.print(f"    {core.venv_python(repo)} {repo / 'atlas' / 'bin' / 'atlas'} status")
+        if dash and dash.get("ok"):
+            from . import dashboard_setup as _dash
+            cfg = _dash.dashboard_config(repo, core.venv_python(repo))
+            CONSOLE.print(
+                f"\n  Dashboard: http://{cfg['host']}:{cfg['port']}"
+                f"  (log: {_dash.dashboard_log_file(repo)})"
+            )
     else:
         CONSOLE.print(f"\n[red]✗ Setup failed.[/red]")
         log = core.log_file(repo)
         if log.exists():
             CONSOLE.print(f"  Check the proxy log: {log}")
+
+
+def _prompt_password(prompt: str) -> str:
+    """Read a password without echoing it.
+
+    getpass falls back to a visible prompt when no TTY is available (some CI
+    and container consoles); the wizard is interactive anyway, so warn once.
+    """
+    import getpass
+    try:
+        return getpass.getpass(prompt)
+    except (EOFError, KeyboardInterrupt):
+        return ""
+    except Exception:
+        return Prompt.ask(prompt, password=True)
+
+
+def _dashboard_section(repo: Path, venv_py: Path) -> dict:
+    """Optional step: create the admin password and start the dashboard.
+
+    Returns a summary dict for the final table. Never raises — a failure here
+    must not fail an otherwise successful proxy install.
+    """
+    from . import dashboard_setup as dash
+
+    result: dict = {"wanted": False, "ok": False, "detail": "skipped"}
+
+    try:
+        if not Confirm.ask("\nStart the management dashboard too?", default=True):
+            return result
+    except (EOFError, KeyboardInterrupt):
+        return result
+
+    result["wanted"] = True
+
+    # ---- Password ----
+    try:
+        if dash.admin_exists(repo, venv_py):
+            CONSOLE.print("[yellow]An admin already exists — keeping it.[/yellow]")
+        else:
+            CONSOLE.print("\n[cyan]Set the dashboard password.[/cyan]")
+            CONSOLE.print("  [dim]12+ characters, upper, lower, number and symbol.[/dim]")
+            pw1 = _prompt_password("  Password: ")
+            if not pw1:
+                result["detail"] = "no password entered"
+                CONSOLE.print("[red]✘ No password entered — skipping dashboard.[/red]")
+                return result
+            pw2 = _prompt_password("  Confirm:  ")
+            if pw1 != pw2:
+                result["detail"] = "passwords did not match"
+                CONSOLE.print("[red]✘ Passwords did not match — skipping dashboard.[/red]")
+                return result
+
+            sys.path.insert(0, str(repo))
+            try:
+                from dashboard.api.security import password_strength_ok  # type: ignore
+                ok, msg = password_strength_ok(pw1)
+            except Exception:
+                ok, msg = True, "ok"
+            finally:
+                try:
+                    sys.path.remove(str(repo))
+                except ValueError:
+                    pass
+            if not ok:
+                result["detail"] = msg
+                CONSOLE.print(f"[red]✘ {msg}[/red]")
+                return result
+
+            ok, msg = dash._create_admin(repo, venv_py, pw1)
+            if not ok:
+                result["detail"] = msg
+                CONSOLE.print(f"[red]✘ Could not create the admin: {msg}[/red]")
+                return result
+            CONSOLE.print("[green]✓[/green] Admin password set")
+    except (EOFError, KeyboardInterrupt):
+        result["detail"] = "cancelled"
+        return result
+
+    # ---- Start ----
+    CONSOLE.print("\n[cyan]Starting dashboard...[/cyan]")
+    try:
+        ok, msg, pid = dash.start_detached(repo, venv_py)
+    except Exception as e:  # never let this break the install
+        result["detail"] = f"start failed: {e}"
+        CONSOLE.print(f"[red]✘ {result['detail']}[/red]")
+        return result
+
+    if not ok:
+        result["detail"] = msg
+        CONSOLE.print(f"[red]✘ {msg}[/red]")
+        return result
+
+    healthy, hmsg = dash.health_check(repo, timeout=25.0)
+    result["ok"] = healthy
+    result["detail"] = hmsg
+    if healthy:
+        cfg = dash.dashboard_config(repo, venv_py)
+        CONSOLE.print(f"[green]✓[/green] Dashboard up — http://{cfg['host']}:{cfg['port']}")
+    else:
+        CONSOLE.print(f"[red]✘ Dashboard did not become healthy: {hmsg}[/red]")
+        log = dash.dashboard_log_file(repo)
+        if log.exists():
+            CONSOLE.print(f"[dim]  log: {log}[/dim]")
+    return result
 
 
 def run_wizard(repo: Path, venv_py: Path) -> int:
@@ -284,9 +409,12 @@ def run_wizard(repo: Path, venv_py: Path) -> int:
         CONSOLE.print("[dim]  Skipped; proxy management still works via the runtime "
                       "and the venv python.[/dim]")
 
+    # ---- Step 5b: Optional dashboard ----
+    dash_result = _dashboard_section(repo, venv_py)
+
     # ---- Step 6: Summary + exit ----
-    _show_summary(repo, added, total, True, message, shim_ok, shim_msg)
-    _show_exit(repo, True, shim_ok)
+    _show_summary(repo, added, total, True, message, shim_ok, shim_msg, dash_result)
+    _show_exit(repo, True, shim_ok, dash_result)
 
     return 0
 
