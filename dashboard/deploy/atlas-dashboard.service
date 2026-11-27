@@ -15,8 +15,9 @@ RestartSec=3
 
 # Bind to loopback: nginx is the only way in, TLS terminates there.
 # Set DASHBOARD_HOST=0.0.0.0 only for a trusted LAN, never for the internet.
+# DASHBOARD_PORT is read from .env (set via 'atlas dashboard change-port')
+EnvironmentFile=/root/atlas/.env
 Environment=DASHBOARD_HOST=127.0.0.1
-Environment=DASHBOARD_PORT=8080
 Environment=DASHBOARD_ALLOWED_HOSTS=SERVER_HOST,localhost,127.0.0.1
 Environment=DASHBOARD_PUBLIC_TLS=1
 # Security: set a 32-byte key for TOTP encryption and audit HMAC in production

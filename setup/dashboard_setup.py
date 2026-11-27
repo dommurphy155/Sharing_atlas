@@ -40,12 +40,24 @@ def dashboard_log_file(repo: Path) -> Path:
 
 def dashboard_config(repo: Path, venv_py: Path) -> dict:
     """Read the dashboard's effective host/port without importing the app."""
+    # Read from .env file first (same as the running service will)
+    import os
+    env_file = repo / ".env"
+    dash_port = "8080"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("DASHBOARD_PORT="):
+                dash_port = line.split("=", 1)[1]
+                break
+    os.environ.setdefault("DASHBOARD_PORT", dash_port)
+
     sys.path.insert(0, str(repo))
     try:
         from dashboard.api.config import APP_HOST, APP_PORT  # type: ignore
         return {"host": APP_HOST, "port": int(APP_PORT)}
     except Exception:
-        return {"host": "127.0.0.1", "port": 8080}
+        return {"host": "127.0.0.1", "port": int(dash_port)}
     finally:
         try:
             sys.path.remove(str(repo))

@@ -695,7 +695,7 @@ HELP_TEXT = f"""
 
 [dim]Repo-location agnostic — finds the proxy package from this script's path.[/dim]
 
-[bold]Lifecycle[/bold]
+[bold]Proxy Lifecycle[/bold]
   [cyan]atlas[/cyan] install              Atlas proxy + coding-harness setup wizard
   [cyan]atlas[/cyan] install --dry-run    Preview the wizard without changes
   [cyan]atlas[/cyan] uninstall            Remove systemd unit + cleanup
@@ -705,6 +705,7 @@ HELP_TEXT = f"""
   [cyan]atlas[/cyan] restart              Restart (keeps current provider)
   [cyan]atlas[/cyan] restart --openrouter   Switch back to OpenRouter
   [cyan]atlas[/cyan] restart --huggingface --model PROVIDER/MODEL
+  [cyan]atlas[/cyan] restart --nvidia --model MODEL
 
 [bold]Insight[/bold]
   [cyan]atlas[/cyan] status               Service + HTTP + key summary
@@ -719,10 +720,21 @@ HELP_TEXT = f"""
   [cyan]atlas[/cyan] import-key-file <PATH> --dry-run  Preview without writing
   [dim]Imports are append+dedupe — the existing key file is never overwritten.[/dim]
 
+[bold]Dashboard (Admin Web UI)[/bold]
+  [cyan]atlas[/cyan] dashboard start              Start the dashboard
+  [cyan]atlas[/cyan] dashboard stop               Stop the dashboard
+  [cyan]atlas[/cyan] dashboard restart            Restart the dashboard
+  [cyan]atlas[/cyan] dashboard status             Show dashboard status + URL
+  [cyan]atlas[/cyan] dashboard logs               Tail dashboard logs
+  [cyan]atlas[/cyan] dashboard setup-token        Mint a one-time setup token
+  [cyan]atlas[/cyan] dashboard change-password    Change admin password
+  [cyan]atlas[/cyan] dashboard change-port        Change listen port (updates .env)
+
 [bold]Misc[/bold]
   [cyan]atlas[/cyan] version              Print version + paths
 
-[dim]Fuzzy-matched: 'atlas srt' → restart, 'atlas satus' → status.[/dim]
+[dim]Fuzzy-matched: 'atlas srt' → restart, 'atlas satus' → status.
+Cross-platform: Linux, macOS, Windows (PowerShell). Systemd when available, pidfile fallback.[/dim]
 """
 
 
@@ -787,10 +799,10 @@ examples:
     sp_ikf.add_argument("--dry-run", action="store_true", dest="dry_run",
                         help="Preview what would be added without writing")
 
-    # dashboard <setup-token|start|stop|restart|status>
+    # dashboard <setup-token|start|stop|restart|status|change-password|change-port>
     sp_dash = sub.add_parser("dashboard", help="Manage the Atlas web dashboard")
     dash_sub = sp_dash.add_subparsers(dest="dashboard_command")
-    for dname in ("setup-token", "start", "stop", "restart", "status"):
+    for dname in ("setup-token", "start", "stop", "restart", "status", "change-password", "change-port"):
         dash_sub.add_parser(dname, help=f"dashboard {dname}")
     sp_dash.set_defaults(_atlas_cmd=cmd_dashboard)
 
