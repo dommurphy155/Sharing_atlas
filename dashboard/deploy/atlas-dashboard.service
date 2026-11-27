@@ -32,7 +32,10 @@ PrivateTmp=yes
 
 # Protect system directories
 ProtectSystem=strict
-ProtectHome=yes
+# NOT ProtectHome=yes: the repo and venv live under /root, and hiding /root
+# makes exec fail with 203/EXEC. read-only still blocks writes there; the
+# writable paths are granted explicitly below.
+ProtectHome=read-only
 
 # Read-only paths (code)
 ReadOnlyPaths=/root/atlas
