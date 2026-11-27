@@ -38,11 +38,11 @@ def _intro() -> None:
         "API keys. Four steps:\n\n"
         "  1. Bootstrap — check Python, create venv, install dependencies\n"
         "  2. Collect keys — enter your OpenRouter API key(s)\n"
-        "  3. Configure ports — choose proxy + dashboard listen ports\n"
-        "  4. Start proxy — launch with a supervisor so it stays alive\n"
-        "  5. Verify — confirm it's healthy, then exit\n\n"
+        "  3. Start proxy — launch with a supervisor so it stays alive\n"
+        "  4. Verify — confirm it's healthy, then exit\n\n"
         "You'll then be offered the optional dashboard: set an admin password "
         "and it starts alongside the proxy.\n\n"
+        "Default ports: proxy 8788, dashboard 8080 (change later via 'atlas dashboard change-port').\n"
         "No harness configuration. No extra steps. The proxy keeps running "
         "after setup finishes."
     )
@@ -91,79 +91,6 @@ def _save_keys(repo: Path, keys: list[str]) -> tuple[int, int]:
     added = core.append_keys(target, keys)
     total = len(core.read_keys(target))
     return added, total
-
-
-def _configure_ports(repo: Path) -> dict:
-    """Prompt the user for proxy and dashboard ports. Returns dict with ports."""
-    import os
-
-    # Read existing .env for current values
-    env_file = repo / ".env"
-    current_proxy_port = "8788"
-    current_dash_port = "8080"
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            line = line.strip()
-            if line.startswith("LISTEN_PORT="):
-                current_proxy_port = line.split("=", 1)[1]
-            elif line.startswith("DASHBOARD_PORT="):
-                current_dash_port = line.split("=", 1)[1]
-
-    CONSOLE.print("\n[cyan]Port configuration[/cyan]")
-    CONSOLE.print("  Enter ports for proxy and dashboard (1-65535).")
-    CONSOLE.print("  Press Enter to keep current values.\n")
-
-    proxy_port = Prompt.ask("  Proxy port", default=current_proxy_port)
-    dash_port = Prompt.ask("  Dashboard port", default=current_dash_port)
-
-    # Validate
-    try:
-        proxy_port = int(proxy_port)
-        dash_port = int(dash_port)
-        if not (1 <= proxy_port <= 65535) or not (1 <= dash_port <= 65535):
-            raise ValueError
-    except ValueError:
-        CONSOLE.print("[red]Invalid port (1-65535). Using defaults.[/red]")
-        proxy_port = 8788
-        dash_port = 8080
-
-    if proxy_port == dash_port:
-        CONSOLE.print("[yellow]Ports cannot be the same. Using defaults.[/yellow]")
-        proxy_port = 8788
-        dash_port = 8080
-
-    # Write to .env
-    env_data = {}
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                env_data[k.strip()] = v.strip()
-
-    env_data["LISTEN_PORT"] = str(proxy_port)
-    env_data["DASHBOARD_PORT"] = str(dash_port)
-
-    # Update CORS_ORIGINS to include dashboard port
-    cors = env_data.get("CORS_ORIGINS", "http://127.0.0.1:8080,http://localhost:8080")
-    new_cors = []
-    for origin in cors.split(","):
-        origin = origin.strip()
-        if origin:
-            # Replace dashboard port in origin if it matches old dash port
-            new_origin = origin.replace(f":{current_dash_port}", f":{dash_port}")
-            new_cors.append(new_origin)
-    env_data["CORS_ORIGINS"] = ",".join(new_cors)
-
-    env_file.write_text("\n".join(f"{k}={v}" for k, v in env_data.items()) + "\n")
-    os.environ["LISTEN_PORT"] = str(proxy_port)
-    os.environ["DASHBOARD_PORT"] = str(dash_port)
-
-    CONSOLE.print(f"  [green]✓[/green] Proxy port: {proxy_port}")
-    CONSOLE.print(f"  [green]✓[/green] Dashboard port: {dash_port}")
-    CONSOLE.print(f"  [dim]CORS updated to include dashboard port {dash_port}[/dim]")
-
-    return {"proxy_port": proxy_port, "dash_port": dash_port}
 
 
 def _os_module():
@@ -445,13 +372,10 @@ def run_wizard(repo: Path, venv_py: Path) -> int:
     CONSOLE.print(f"\n[green]✓[/green] Saved {added} new key(s) "
                   f"({total} total) to {core.key_file(repo)}")
 
-    # ---- Step 3: Configure ports ----
-    _configure_ports(repo)
-
     # Write runtime provider config (OpenRouter only)
     core.write_runtime_provider(repo, "openrouter")
 
-    # ---- Step 4: Start proxy with supervisor (stays alive) ----
+    # ---- Step 3: Start proxy with supervisor (stays alive) ----
     CONSOLE.print("\n[cyan]Starting proxy (stays alive after setup)...[/cyan]")
     started_ok, message = _start_and_verify(repo, venv_py, len(keys))
 

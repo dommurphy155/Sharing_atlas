@@ -799,10 +799,10 @@ examples:
     sp_ikf.add_argument("--dry-run", action="store_true", dest="dry_run",
                         help="Preview what would be added without writing")
 
-    # dashboard <setup-token|start|stop|restart|status|change-password|change-port>
+    # dashboard <start|stop|restart|status|change-password|change-port>
     sp_dash = sub.add_parser("dashboard", help="Manage the Atlas web dashboard")
     dash_sub = sp_dash.add_subparsers(dest="dashboard_command")
-    for dname in ("setup-token", "start", "stop", "restart", "status", "change-password", "change-port"):
+    for dname in ("start", "stop", "restart", "status", "change-password", "change-port"):
         dash_sub.add_parser(dname, help=f"dashboard {dname}")
     sp_dash.set_defaults(_atlas_cmd=cmd_dashboard)
 
