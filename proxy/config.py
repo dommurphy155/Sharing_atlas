@@ -566,8 +566,12 @@ CORS_ORIGINS: List[str] = [
 # ---------------------------------------------------------------------------
 UPSTREAM_REFERER: str = _env("ATLAS_UPSTREAM_REFERER", "https://localhost:8788")
 UPSTREAM_TITLE: str = _env("ATLAS_UPSTREAM_TITLE", "Atlas-Translation-Proxy")
-SAVE_PAYLOAD_FILES: bool = _env_bool("ATLAS_SAVE_PAYLOAD_FILES", True)
-"""If True, write incoming request payloads to PAYLOAD_DIR for debugging."""
+SAVE_PAYLOAD_FILES: bool = _env_bool("ATLAS_SAVE_PAYLOAD_FILES", False)
+"""If True, write incoming request payloads to PAYLOAD_DIR for debugging.
+
+Off by default: request bodies can contain prompts and credentials, and the
+directory is otherwise world-writable /tmp. Enable deliberately.
+"""
 PAYLOAD_DIR: str = _env("ATLAS_PAYLOAD_DIR", "/tmp/atlas_payloads")
 
 

@@ -5,6 +5,7 @@ Only allow-listed actions exist. No user string ever reaches a shell.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -194,11 +195,16 @@ def check_updates() -> Dict[str, Any]:
 
 
 def backup_config(label: str = "") -> Dict[str, Any]:
-    """Copy the credential/config surface into an owner-only backup dir."""
+    """Copy the credential/config surface into an owner-only backup dir.
+
+    ``label`` is reduced to a safe slug: it lands in a filesystem path, so any
+    separator or dot sequence could escape BACKUP_DIR.
+    """
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(BACKUP_DIR, 0o700)
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    name = f"{stamp}{'_' + label if label else ''}"
+    slug = re.sub(r"[^A-Za-z0-9_-]", "", label or "")[:32]
+    name = f"{stamp}{'_' + slug if slug else ''}"
     dest = BACKUP_DIR / name
     dest.mkdir(parents=True, exist_ok=True)
     copied = []

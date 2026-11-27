@@ -187,14 +187,23 @@ def admin_exists() -> bool:
     return row is not None
 
 
-def validate_setup_token(token: str) -> bool:
-    with db.connect() as conn:
+def validate_setup_token(token: str, consume: bool = False) -> bool:
+    """Check a setup token. With consume=True, burn it on success.
+
+    Consumption is part of the same transaction as the check, so two requests
+    racing the same token cannot both succeed.
+    """
+    with db.write_lock() as conn:
         row = conn.execute(
             "SELECT token_hash, expires_at, used FROM setup_token WHERE id = 1"
         ).fetchone()
-    if not row or row["used"] or row["expires_at"] < db.now():
-        return False
-    return hmac.compare_digest(row["token_hash"], _sha256(token))
+        if not row or row["used"] or row["expires_at"] < db.now():
+            return False
+        if not hmac.compare_digest(row["token_hash"], _sha256(token)):
+            return False
+        if consume:
+            conn.execute("UPDATE setup_token SET used = 1 WHERE id = 1")
+    return True
 
 
 def create_admin(username: str, password: str, totp_secret: str | None = None,
@@ -364,12 +373,23 @@ def revoke_all_sessions(except_sid: str = "") -> int:
 
 
 def list_sessions() -> list[dict]:
+    """Session metadata for the UI — never the session token itself.
+
+    Only a short prefix is returned, enough to identify a row and to match the
+    caller's own session against ``current`` without handing every live token
+    to whoever can read this endpoint.
+    """
     with db.connect() as conn:
         rows = conn.execute(
             "SELECT id, created_at, last_seen, expires_at, ip, user_agent, revoked "
             "FROM sessions ORDER BY last_seen DESC LIMIT 50"
         ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["id"] = (d.get("id") or "")[:8]
+        out.append(d)
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -97,6 +97,10 @@ def revoke(body: RevokeBody, request: Request) -> dict:
 
 @router.post("/auth/logout-all")
 def logout_all(request: Request) -> dict:
+    # Session + CSRF: this revokes the caller's session and writes an audit row,
+    # so it must not be reachable cross-site or unauthenticated.
+    require_session(request)
+    require_csrf(request)
     sid = request.cookies.get(SESSION_COOKIE)
     if sid:
         security.revoke_session(sid)

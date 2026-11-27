@@ -184,15 +184,27 @@ def read_keys(path: Path) -> list[str]:
 
 
 def append_keys(path: Path, new_keys: list[str]) -> int:
-    """Append de-duplicated keys to the key file. Returns count newly added."""
+    """Append de-duplicated keys to the key file. Returns count newly added.
+
+    The file holds live API keys, so it is created 0600 and never left at the
+    process umask default.
+    """
     existing = set(read_keys(path))
     to_add = [k for k in new_keys if k not in existing]
     if not to_add:
         return 0
     path.parent.mkdir(parents=True, exist_ok=True)
     suffix = "" if (path.exists() and path.read_text().endswith("\n")) else "\n"
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(suffix + "\n".join(to_add) + "\n")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    fd = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            fh.write(suffix + "\n".join(to_add) + "\n")
+    finally:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
     return len(to_add)
 
 

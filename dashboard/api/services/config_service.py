@@ -31,6 +31,9 @@ _INT_KEYS = {"LISTEN_PORT", "MAX_RETRIES", "MAX_CONCURRENT_PER_KEY",
 _FLOAT_KEYS = {"COOLDOWN_BASE_SECONDS", "SUSPEND_SECONDS"}
 _BOOL_KEYS = {"FORCE_DEFAULT_MODEL", "LOG_JSON"}
 
+# A .env key: letters, digits, underscore; must not start with a digit.
+_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
 
 def _proxy_config():
     """Import proxy.config from the repo root (same source the CLI uses)."""
@@ -142,13 +145,26 @@ def read_env() -> Dict[str, Any]:
 
 
 def validate_env(values: Dict[str, str]) -> List[str]:
-    """Return human-readable problems. Empty list = valid."""
+    """Return human-readable problems. Empty list = valid.
+
+    Rejects anything that could break out of a single ``KEY=value`` line.
+    ``.env`` is consumed by systemd as an EnvironmentFile, so a newline in a
+    value injects an entirely new directive (e.g. LD_PRELOAD) that the proxy
+    would inherit on its next start.
+    """
     errs: List[str] = []
     for k, v in values.items():
+        if not _KEY_RE.fullmatch(k or ""):
+            errs.append(f"Invalid key {k!r}.")
+            continue
         if k not in MANAGED_KEYS:
+            # Unmanaged keys are preserved, not written from user input.
             continue
         v = (v or "").strip()
         if v == "":
+            continue
+        if "\n" in v or "\r" in v or "\x00" in v:
+            errs.append(f"{k} must not contain newlines or null bytes.")
             continue
         if k in _INT_KEYS:
             try:
@@ -194,10 +210,17 @@ def preview_env(values: Dict[str, str]) -> Dict[str, Any]:
 
 
 def write_env(values: Dict[str, str], backup: bool = True) -> Dict[str, Any]:
-    """Rewrite .env, preserving comments and unmanaged keys verbatim."""
+    """Rewrite .env, preserving comments and unmanaged keys verbatim.
+
+    Only managed keys are ever written from user input; anything else in the
+    request is dropped. This is the defence-in-depth counterpart to the
+    newline check in validate_env: even if a future caller forgets to
+    validate, an attacker cannot introduce a new directive.
+    """
     errs = validate_env(values)
     if errs:
         return {"ok": False, "errors": errs}
+    safe = {k: v for k, v in values.items() if k in MANAGED_KEYS}
     backup_path = None
     if backup and ENV_FILE.exists():
         from . import system_service
@@ -208,13 +231,13 @@ def write_env(values: Dict[str, str], backup: bool = True) -> Dict[str, Any]:
     if ENV_FILE.exists():
         for line in ENV_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
             m = _LINE.match(line)
-            if m and m.group(1) in values:
+            if m and m.group(1) in safe:
                 k = m.group(1)
                 seen.add(k)
-                lines.append(f"{k}={values[k]}")
+                lines.append(f"{k}={safe[k]}")
             else:
                 lines.append(line)
-    for k, v in values.items():
+    for k, v in safe.items():
         if k not in seen:
             lines.append(f"{k}={v}")
     ENV_FILE.parent.mkdir(parents=True, exist_ok=True)

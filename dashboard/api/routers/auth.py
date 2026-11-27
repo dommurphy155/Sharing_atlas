@@ -34,12 +34,16 @@ def auth_status(request: Request) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# First-run setup — password only, no token, no username, no TOTP.
+# First-run setup — password only, no username, no TOTP.
 # If no admin exists, the first password set becomes the admin password.
-# Protected by rate limiting to prevent brute-forcing the setup window.
+#
+# The caller must present a setup token minted on the local console
+# (`atlas dashboard setup-token`). Without it, the first person to reach the
+# endpoint could claim the admin slot on a fresh install.
 # ---------------------------------------------------------------------------
 class SetupComplete(BaseModel):
     password: str
+    token: str = ""
 
 
 @router.post("/setup/complete")
@@ -49,11 +53,19 @@ def setup_complete(body: SetupComplete, request: Request) -> dict:
 
     if security.admin_exists():
         raise HTTPException(410, "Already configured")
+
+    # The token is required even before an admin exists. A missing or wrong
+    # token is indistinguishable from a wrong password to the caller. Consume
+    # it in the same check so it cannot be replayed within its TTL.
+    if not body.token or not security.validate_setup_token(body.token, consume=True):
+        security.audit("setup_denied", "", client_ip(request))
+        raise HTTPException(403, "A valid setup token is required")
+
     ok, msg = security.password_strength_ok(body.password)
     if not ok:
         raise HTTPException(400, msg)
     created, m = security.create_admin(
-        "admin", body.password, None, "", ip=client_ip(request)
+        "admin", body.password, None, body.token, ip=client_ip(request)
     )
     if not created:
         raise HTTPException(409, m)

@@ -1319,12 +1319,19 @@ def _dump_payload(rid: str, tag: str, body: Any) -> str:
     if not SAVE_PAYLOAD_FILES:
         return ""
     import os
+    import re
     import orjson
 
+    # rid goes into a filename; keep it to a safe charset so a crafted header
+    # cannot escape PAYLOAD_DIR even though the payload_ prefix already blocks
+    # simple ../ sequences.
+    safe_rid = re.sub(r"[^A-Za-z0-9_-]", "", rid or "")[:64] or "unknown"
+    safe_tag = re.sub(r"[^A-Za-z0-9_-]", "", tag or "")[:16]
     os.makedirs(PAYLOAD_DIR, exist_ok=True)
-    path = os.path.join(PAYLOAD_DIR, f"payload_{rid}{tag}.json")
+    path = os.path.join(PAYLOAD_DIR, f"payload_{safe_rid}{safe_tag}.json")
     try:
-        with open(path, "w") as f:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             f.write(orjson.dumps(body, option=orjson.OPT_INDENT_2).decode())
         log.info("req=%s payload_saved %s (%d bytes)", rid, path, os.path.getsize(path))
     except Exception:

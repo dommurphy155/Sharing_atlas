@@ -78,9 +78,24 @@ def _running() -> bool:
 
 
 def cmd_setup_token(args) -> int:
-    """Retired: setup is password-only. Kept so old scripts fail loudly."""
-    CONSOLE.print("[yellow]Setup tokens are gone. The dashboard is password-only.[/yellow]")
-    CONSOLE.print("[dim]Open the dashboard and set a password if no admin exists yet.[/dim]")
+    """Mint a one-time setup token for first-run admin creation.
+
+    Printed to the local terminal only, valid for a short window, single use.
+    """
+    def _run():
+        from dashboard.api import db, security
+        db.init_db()
+        if security.admin_exists():
+            return None, "The dashboard already has an administrator."
+        return security.mint_setup_token(), ""
+
+    token, err = _with_path(_run)
+    if err:
+        CONSOLE.print(f"[yellow]{err}[/yellow]")
+        return 0
+    CONSOLE.print("[bold]Setup token[/bold] (valid 15 minutes, single use):")
+    CONSOLE.print(f"  [green]{token}[/green]")
+    CONSOLE.print("[dim]Post it to /api/setup/complete with your chosen password.[/dim]")
     return 0
 
 

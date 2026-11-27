@@ -73,10 +73,21 @@ def require_session(request: Request) -> dict:
 
 
 def require_csrf(request: Request) -> None:
-    """Double-submit CSRF check for mutating requests."""
+    """Double-submit CSRF check for mutating requests.
+
+    Both values must be non-empty and compare equal. The comparison is on
+    ``str``; a non-ASCII header would raise inside compare_digest, so encode
+    explicitly and treat any failure as a rejection rather than a 500.
+    """
     cookie = request.cookies.get(CSRF_COOKIE, "")
     header = request.headers.get(CSRF_HEADER, "")
-    if not cookie or not header or not hmac.compare_digest(cookie, header):
+    if not cookie or not header:
+        raise HTTPException(status_code=403, detail="Invalid CSRF token")
+    try:
+        ok = hmac.compare_digest(cookie.encode("utf-8"), header.encode("utf-8"))
+    except (UnicodeEncodeError, AttributeError):
+        ok = False
+    if not ok:
         raise HTTPException(status_code=403, detail="Invalid CSRF token")
 
 
