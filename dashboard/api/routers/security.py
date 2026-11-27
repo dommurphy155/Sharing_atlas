@@ -190,20 +190,17 @@ def recovery_verify(body: RecoveryVerifyBody, request: Request) -> dict:
     # Aggressive rate limit: 3 attempts per minute per IP
     rate_limit(request, 3, window=60)
 
-    # Independent lockout budget — recovery attempts must not consume the
-    # login lockout, and vice versa.
-    remaining = security.recovery_lockout_remaining(ip)
-    if remaining > 0:
+    # Single throttled entry point — records the outcome after checking, so a
+    # successful redemption is not counted as a failure.
+    try:
+        ok = security.check_recovery_code(body.code, ip)
+    except security.RecoveryThrottled as exc:
         raise HTTPException(
             429,
             "Too many attempts. Try again later.",
-            headers={"Retry-After": str(remaining)},
+            headers={"Retry-After": str(exc.retry_after)},
         )
 
-    # Record the outcome only after checking, so a successful redemption is
-    # not counted as a failure.
-    ok = security.verify_recovery_code(body.code)
-    security.record_recovery_attempt(ip, ok)
     if ok:
         security.audit("recovery_code_used", "", ip)
         return {"ok": True}

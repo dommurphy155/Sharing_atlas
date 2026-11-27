@@ -58,6 +58,7 @@ export default function Security() {
   const current = d.current;
   const chainOk = d.audit_chain_ok !== false;
   const chainUnconfigured = d.audit_chain_state === "unconfigured";
+  const chainAnchorInvalid = d.audit_chain_state === "anchor_invalid";
 
   return (
     <>
@@ -151,9 +152,11 @@ export default function Security() {
                 "Audit chain",
                 chainUnconfigured
                   ? "UNCONFIGURED"
-                  : chainOk
-                    ? "verified ✓"
-                    : "BROKEN",
+                  : chainAnchorInvalid
+                    ? "ANCHOR INVALID"
+                    : chainOk
+                      ? "verified ✓"
+                      : "BROKEN",
               ],
               ["Setup", "closed (admin exists)"],
             ]}
@@ -172,9 +175,11 @@ export default function Security() {
       >
         {(!chainOk || chainUnconfigured) && (
           <div className="form-error" style={{ marginBottom: 12 }}>
-            {!chainOk
-              ? "⚠ Audit chain integrity check FAILED — possible tampering detected."
-              : "⚠ Audit chain is not configured — set DASHBOARD_AUDIT_HMAC_KEY to make the log tamper-evident."}
+            {chainAnchorInvalid
+              ? "⚠ Audit anchor is unreadable — tail truncation cannot be ruled out. Restore data/audit_anchor.json from backup."
+              : !chainOk
+                ? "⚠ Audit chain integrity check FAILED — possible tampering detected."
+                : "⚠ Audit chain is not configured — set DASHBOARD_AUDIT_HMAC_KEY to make the log tamper-evident."}
           </div>
         )}
         {d.audit?.length ? (

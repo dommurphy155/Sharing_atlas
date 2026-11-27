@@ -71,13 +71,18 @@ class LoginBody(BaseModel):
     recovery_code: str = ""
 
 
-def _verify_second_factor(admin: dict, body: LoginBody) -> bool:
-    """Check the second factor. True when no factor is required or it passes."""
+def _verify_second_factor(admin: dict, body: LoginBody, ip: str) -> bool:
+    """Check the second factor. True when no factor is required or it passes.
+
+    Recovery codes go through security.check_recovery_code so this path is
+    throttled and recorded exactly like the standalone verify endpoint.
+    Raises security.RecoveryThrottled when the IP is locked out.
+    """
     if not admin.get("totp_enabled"):
         return True
     if body.code and security.verify_totp(admin.get("totp_secret"), body.code):
         return True
-    if body.recovery_code and security.verify_recovery_code(body.recovery_code):
+    if body.recovery_code and security.check_recovery_code(body.recovery_code, ip):
         return True
     return False
 
@@ -89,13 +94,21 @@ def login(body: LoginBody, request: Request, response: Response) -> dict:
     # Rate limiting (stricter than lockout — per-IP, per-minute)
     rate_limit(request, RATE_LIMIT_LOGIN, window=60)
 
-    # Exponential lockout
+    # Exponential lockout. The recovery-code budget is separate, so a failed
+    # 2FA attempt cannot be used to lock the password login out (or vice versa).
     remaining = security.lockout_remaining(ip)
     if remaining > 0:
         raise HTTPException(
             429,
             "Too many attempts. Try again later.",
             headers={"Retry-After": str(remaining)},
+        )
+    recovery_remaining = security.recovery_lockout_remaining(ip)
+    if recovery_remaining > 0:
+        raise HTTPException(
+            429,
+            "Too many attempts. Try again later.",
+            headers={"Retry-After": str(recovery_remaining)},
         )
 
     admin = security.get_admin()
@@ -110,13 +123,22 @@ def login(body: LoginBody, request: Request, response: Response) -> dict:
 
     # Second factor — only reached with a correct password, so the response
     # distinguishes "password wrong" (401) from "code required" (428).
-    if admin.get("totp_enabled") and not _verify_second_factor(admin, body):
-        security.audit("login_2fa_failed", admin["username"], ip)
-        raise HTTPException(
-            428,
-            "Second factor required",
-            headers={"X-2FA-Required": "totp"},
-        )
+    if admin.get("totp_enabled"):
+        try:
+            passed = _verify_second_factor(admin, body, ip)
+        except security.RecoveryThrottled as exc:
+            raise HTTPException(
+                429,
+                "Too many attempts. Try again later.",
+                headers={"Retry-After": str(exc.retry_after)},
+            )
+        if not passed:
+            security.audit("login_2fa_failed", admin["username"], ip)
+            raise HTTPException(
+                428,
+                "Second factor required",
+                headers={"X-2FA-Required": "totp"},
+            )
 
     # Upgrade hash if params changed
     if new_hash:

@@ -379,11 +379,25 @@ def _audit_hmac(prev_hmac: str, event: str, actor: str, ip: str, detail: str, ts
 
 
 def _load_anchor() -> dict:
-    """Read the external chain anchor. Missing/corrupt anchor = no anchor."""
+    """Read the external chain anchor.
+
+    Returns {} only when the anchor file does not exist at all (first run).
+    A file that exists but cannot be parsed is a corruption signal, not an
+    absence: callers must treat it as a broken chain rather than re-baselining.
+    """
     try:
-        return json.loads(AUDIT_ANCHOR_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        raw = AUDIT_ANCHOR_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return {}
+    except OSError:
+        return {"_invalid": True}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {"_invalid": True}
+    if not isinstance(data, dict) or "last_id" not in data or "last_hmac" not in data:
+        return {"_invalid": True}
+    return data
 
 
 def _save_anchor(last_id: int, last_hmac: str) -> None:
@@ -422,10 +436,12 @@ def flush_pending_audit() -> None:
 def anchor_audit_chain() -> None:
     """Record the current chain head externally if no anchor exists yet.
 
-    Called at startup so rows written before the anchor file existed (or after
-    it was lost) become the trusted baseline rather than a verification failure.
+    Called at startup so rows written before the anchor file existed become the
+    trusted baseline. An anchor file that exists but is unreadable/corrupt is
+    never re-baselined — that would let an attacker who damaged the anchor
+    silently restore truncation detection.
     """
-    if _load_anchor():
+    if AUDIT_ANCHOR_PATH.exists():
         return
     with db.connect() as conn:
         row = conn.execute(
@@ -455,7 +471,9 @@ def verify_audit_chain() -> tuple[bool, int, str]:
     """Verify the HMAC chain.
 
     Returns (ok, broken_at_id, state) where state is "ok", "unconfigured"
-    (no key — cannot be verified, fail closed) or "broken".
+    (no key — cannot be verified, fail closed), "anchor_invalid" (the external
+    anchor exists but is unreadable, so truncation cannot be ruled out) or
+    "broken".
     """
     if not AUDIT_HMAC_KEY:
         return False, 0, "unconfigured"
@@ -473,8 +491,11 @@ def verify_audit_chain() -> tuple[bool, int, str]:
         prev = row["hmac"] or ""
 
     # Anchor check: the DB must not have been truncated past the last head we
-    # recorded externally.
+    # recorded externally. An invalid anchor fails closed — it is not treated
+    # as "no anchor", which would silently disable truncation detection.
     anchor = _load_anchor()
+    if anchor.get("_invalid"):
+        return False, rows[-1]["id"] if rows else 0, "anchor_invalid"
     anchor_id = anchor.get("last_id")
     anchor_hmac = anchor.get("last_hmac")
     if anchor_id is not None and anchor_hmac is not None:
@@ -593,6 +614,29 @@ def recovery_lockout_remaining(ip: str) -> int:
             if elapsed < lockout:
                 return lockout - elapsed
     return 0
+
+
+class RecoveryThrottled(Exception):
+    """Raised when a recovery-code attempt is inside the lockout window."""
+
+    def __init__(self, retry_after: int) -> None:
+        super().__init__("recovery attempts locked")
+        self.retry_after = retry_after
+
+
+def check_recovery_code(code: str, ip: str) -> bool:
+    """Single entry point for recovery-code verification.
+
+    Every caller — login fallback or the standalone verify endpoint — goes
+    through here, so no path can verify a code without being throttled and
+    recorded. Raises RecoveryThrottled when the IP is locked out.
+    """
+    remaining = recovery_lockout_remaining(ip)
+    if remaining > 0:
+        raise RecoveryThrottled(remaining)
+    ok = bool(code) and verify_recovery_code(code)
+    record_recovery_attempt(ip, ok)
+    return ok
 
 
 # ---------------------------------------------------------------------------
