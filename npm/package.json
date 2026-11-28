@@ -1,0 +1,27 @@
+{
+  "name": "@atlas-ai/cli",
+  "version": "0.0.1",
+  "description": "Atlas Translation Proxy — npm distribution and CLI management layer",
+  "license": "MIT",
+  "bin": {
+    "atlas": "bin/atlas.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin",
+    "lib"
+  ],
+  "keywords": [
+    "atlas",
+    "proxy",
+    "llm",
+    "openrouter",
+    "anthropic",
+    "openai"
+  ],
+  "scripts": {
+    "postinstall": "node lib/postinstall.js"
+  }
+}
