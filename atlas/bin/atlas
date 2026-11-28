@@ -28,11 +28,10 @@ from pathlib import Path
 # Repo discovery
 # ---------------------------------------------------------------------------
 def _find_repo_root() -> Path:
-    """Repo root = parent of atlas/.
+    """Walk up from this file to find the proxy repo.
 
     Layout: <repo>/atlas/bin/atlas  →  parent.parent
-    Falls back to CWD if the layout isn't found (still tries to import
-    proxy package from there).
+    Falls back to CWD if the layout isn't found.
     """
     here = Path(__file__).resolve().parent  # atlas/bin
     candidate = here.parent.parent            # repo root
@@ -41,8 +40,7 @@ def _find_repo_root() -> Path:
     cwd = Path.cwd().resolve()
     if (cwd / "proxy" / "main.py").is_file():
         return cwd
-    # Last resort — return what we think it is so error messages name it
-    return candidate
+    raise RuntimeError("Could not locate proxy repo root")
 
 
 REPO_ROOT = _find_repo_root()
@@ -704,7 +702,6 @@ HELP_TEXT = f"""
   [cyan]atlas[/cyan] stop                 Stop the proxy
   [cyan]atlas[/cyan] restart              Restart (keeps current provider)
   [cyan]atlas[/cyan] restart --openrouter   Switch back to OpenRouter
-  [cyan]atlas[/cyan] restart --huggingface --model PROVIDER/MODEL
   [cyan]atlas[/cyan] restart --nvidia --model MODEL
 
 [bold]Insight[/bold]
@@ -766,8 +763,6 @@ examples:
                          help="Switch to OpenRouter provider")
         sp.add_argument("--nvidia", action="store_const", const="nvidia", dest="provider",
                          help="Switch to NVIDIA provider")
-        sp.add_argument("--huggingface", action="store_const", const="huggingface", dest="provider",
-                         help="Switch to HuggingFace provider")
         sp.add_argument("--skip", action="store_const", const="skip", dest="provider",
                          help="Restart without a provider override")
         sp.add_argument("model", nargs="?", default=None,

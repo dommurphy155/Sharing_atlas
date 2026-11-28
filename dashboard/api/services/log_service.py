@@ -30,7 +30,6 @@ from ..config import PROXY_LOG
 # ---------------------------------------------------------------------------
 _SECRET_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9_\-]{8,}"),
-    re.compile(r"hf_[A-Za-z0-9]{8,}"),
     re.compile(r"nvapi-[A-Za-z0-9_\-]{8,}"),
     re.compile(r"(?i)(authorization|api[_-]?key|bearer)\s*[:=]\s*\S+"),
 )

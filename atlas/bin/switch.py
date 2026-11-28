@@ -31,15 +31,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 def _find_repo_root() -> Path:
-    """Walk up from this file to find the proxy repo, like atlas CLI does.
-
-    Falls back to the hardcoded dev path so behaviour on a developer's
-    box where the symlink chain doesn't reach the repo still works.
-    Without this fallback the previous hardcoded `/root/atlas_proxy`
-    leaked into any clone (e.g. `~/Atlas` on a test box) and the
-    `.cache` directory was created in the WRONG repo — then permissions
-    denied when the test user tried to write into the dev box's path.
-    """
+    """Walk up from this file to find the proxy repo, like atlas CLI does."""
     here = Path(__file__).resolve().parent  # atlas/bin
     candidate = here.parent.parent            # repo root
     if (candidate / "proxy" / "main.py").is_file():
@@ -47,7 +39,7 @@ def _find_repo_root() -> Path:
     cwd = Path.cwd().resolve()
     if (cwd / "proxy" / "main.py").is_file():
         return cwd
-    return Path("/root/atlas_proxy")
+    raise RuntimeError("Could not locate proxy repo root")
 
 
 REPO_ROOT = _find_repo_root()
@@ -118,50 +110,6 @@ def _ctx_str(m: Model) -> str:
     if cl >= 1000:
         return f"{cl // 1000}k"
     return str(cl)
-
-
-def _render_model_table(models, favs, page=0, page_size=20, query="") -> tuple[Table, int, int]:
-    """Render a paginated table of models. Returns (table, total_pages, total_filtered)."""
-    # Filter
-    if query:
-        q = query.lower()
-        filtered = [
-            m for m in models
-            if q in m.id.lower() or q in _short_name(m.id).lower()
-            or any(q in t for t in m.tasks)
-        ]
-    else:
-        filtered = list(models)
-
-    total = len(filtered)
-    total_pages = max(1, (total + page_size - 1) // page_size)
-    page = max(0, min(page, total_pages - 1))
-    start = page * page_size
-    end = start + page_size
-    page_items = filtered[start:end]
-
-    table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 1))
-    table.add_column("#", style="dim", width=4, justify="right")
-    table.add_column("ID", style="bold", overflow="fold")
-    table.add_column("Tasks", style="dim", overflow="ellipsis")
-    table.add_column("Ctx", style="dim", justify="right")
-    table.add_column("Price", style="dim")
-    table.add_column("", style="yellow", width=3)
-
-    for i, m in enumerate(page_items, start=1):
-        is_fav = m.id in favs
-        tasks_str = ",".join(t for t in m.tasks if t != "conversational") or "chat"
-        ctx = _ctx_str(m)
-        if m.is_free:
-            price = "[green]FREE[/green]"
-        elif m.prompt_price or m.completion_price:
-            price = f"${m.prompt_price:g}/${m.completion_price:g}"
-        else:
-            price = "—"
-        star = "★" if is_fav else ""
-        table.add_row(str(i), m.id, tasks_str, ctx, price, star)
-
-    return table, total_pages, total
 
 
 def _filter_models(models, query: str) -> list[Model]:

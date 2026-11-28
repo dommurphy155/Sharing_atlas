@@ -54,10 +54,6 @@ def is_windows() -> bool:
     return detect_os() == "windows"
 
 
-def is_posix() -> bool:
-    return detect_os() in ("linux", "macos")
-
-
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -404,7 +400,7 @@ def start_proxy_detached(repo: Path, venv_py: Path) -> tuple[bool, str, int | No
 
 
 __all__ = [
-    "detect_os", "is_windows", "is_posix",
+    "detect_os", "is_windows",
     "repo_root", "venv_python", "venv_python_exists",
     "key_file", "runtime_provider_file", "log_file", "pid_file",
     "ensure_data_dirs", "create_venv", "install_requirements",

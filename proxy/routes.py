@@ -1231,10 +1231,10 @@ async def _stream_openai_to_anthropic(rid: str, upstream_url: str, payload: byte
                 })
                 return
 
-            # HF SSE per-chunk diagnostics (debug only — too noisy for INFO)
+            # SSE per-chunk diagnostics (debug only — too noisy for INFO)
             try:
                 log.debug(
-                    "req=%s HF_SSE_CHUNK %s",
+                    "req=%s SSE_CHUNK %s",
                     rid,
                     data_line.decode("utf-8", errors="replace")[:4000],
                 )

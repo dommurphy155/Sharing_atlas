@@ -20,7 +20,7 @@ _RUNTIME_PROVIDER = REPO_ROOT / "data" / "proxy_data" / "runtime_provider.json"
 # Env keys the dashboard will read and write. Anything else in .env is
 # preserved verbatim on write.
 MANAGED_KEYS = [
-    "LISTEN_HOST", "LISTEN_PORT", "ATLAS_OPENROUTER_MODEL", "ATLAS_HF_MODEL",
+    "LISTEN_HOST", "LISTEN_PORT", "ATLAS_OPENROUTER_MODEL",
     "ATLAS_NV_MODEL", "FORCE_DEFAULT_MODEL", "MAX_RETRIES",
     "MAX_CONCURRENT_PER_KEY", "COOLDOWN_BASE_SECONDS", "SUSPEND_SECONDS",
     "MODEL_CONTEXT_WINDOW", "MAX_INPUT_TOKENS", "LOG_LEVEL", "LOG_JSON",
@@ -63,7 +63,7 @@ def resolved() -> Dict[str, Any]:
 
 
 def providers() -> List[str]:
-    return ["openrouter", "huggingface", "nvidia"]
+    return ["openrouter", "nvidia"]
 
 
 def read_runtime_provider() -> Dict[str, Any]:
@@ -120,13 +120,13 @@ def read_env() -> Dict[str, Any]:
         raw = parse_env(ENV_FILE.read_text(encoding="utf-8", errors="replace"))
     cfg = _proxy_config()
     defaults = {
-        "LISTEN_HOST": "0.0.0.0", "LISTEN_PORT": "8788",
+        "LISTEN_HOST": "127.0.0.1", "LISTEN_PORT": "8788",
         "MAX_RETRIES": "5", "MAX_CONCURRENT_PER_KEY": "24",
         "COOLDOWN_BASE_SECONDS": "45.0", "SUSPEND_SECONDS": "600.0",
         "MODEL_CONTEXT_WINDOW": "200000", "MAX_INPUT_TOKENS": "180000",
         "LOG_LEVEL": "INFO", "LOG_JSON": "0", "FORCE_DEFAULT_MODEL": "0",
         "ATLAS_OPENROUTER_MODEL": cfg.get_default_model(),
-        "ATLAS_HF_MODEL": "", "ATLAS_NV_MODEL": "",
+        "ATLAS_NV_MODEL": "",
     }
     items = []
     for k in MANAGED_KEYS:

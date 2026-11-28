@@ -20,9 +20,8 @@ def _key_file() -> Path:
 
 def _dead_file() -> Path:
     cfg = _proxy_config()
-    name = "nvidia" if cfg.PROVIDER == "nvidia" else "huggingface"
     try:
-        return Path(cfg.NV_DEAD_KEYS_FILE if name == "nvidia" else cfg.HF_DEAD_KEYS_FILE)
+        return Path(cfg.NV_DEAD_KEYS_FILE if cfg.PROVIDER == "nvidia" else cfg.FALLBACK_KEY_FILE)
     except Exception:
         return REPO_ROOT / "data" / "dead_keys.txt"
 
