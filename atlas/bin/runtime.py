@@ -282,7 +282,10 @@ class SystemdRuntime:
                  venv_py: Path) -> None:
         self.env = env
         self.repo_root = repo_root
-        self.service_name = service_name
+        # Strip any directory components / traversal sequences: service_name
+        # flows into a filesystem path (unit_path) and may originate from the
+        # ATLAS_SERVICE_NAME env var. Path(...).name neutralises both.
+        self.service_name = Path(service_name).name
         self.venv_py = venv_py
         self.info = RuntimeInfo(
             mode="systemd",
@@ -403,7 +406,8 @@ class SystemdUserRuntime:
                  venv_py: Path) -> None:
         self.env = env
         self.repo_root = repo_root
-        self.service_name = service_name
+        # Strip directory components / traversal (see SystemdRuntime above).
+        self.service_name = Path(service_name).name
         self.venv_py = venv_py
         self.info = RuntimeInfo(
             mode="systemd-user",
