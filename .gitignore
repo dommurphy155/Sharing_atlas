@@ -75,3 +75,4 @@ docs/
 # real IPs and cert paths. Tracked templates use SERVER_HOST placeholders.
 dashboard/deploy/nginx-live.conf
 dashboard/deploy/*.disabled
+.bak*

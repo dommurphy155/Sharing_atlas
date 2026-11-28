@@ -71,9 +71,9 @@ class RuntimeEnv:
     # Convenience derivations
     @property
     def systemd_system_usable(self) -> bool:
-        # Atlas is sudo-free: the system-level systemd unit (which lives in
-        # /etc/systemd/system and requires sudo to install/remove) is never
-        # selected. Prefer the per-user systemd runtime instead.
+        # Atlas is sudo-free: the system-level systemd unit (which requires
+        # sudo to install/remove) is never selected. Prefer the per-user
+        # systemd runtime instead.
         return False
 
     @property
@@ -317,7 +317,7 @@ EnvironmentFile=-{self.repo_root / ".env"}
 [Install]
 WantedBy=multi-user.target
 """
-        unit_path = Path("/etc/systemd/system") / self.service_name
+        unit_path = Path("/etc/systemd/system") / self.service_name if os.name != "nt" else Path(self.repo_root) / self.service_name
         tmp = self.repo_root / "data" / f".{self.service_name}.tmp"
         tmp.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(unit)
@@ -353,7 +353,7 @@ WantedBy=multi-user.target
             self._run("disable", "--now", self.service_name)
         except Exception:
             pass
-        unit_path = Path("/etc/systemd/system") / self.service_name
+        unit_path = Path("/etc/systemd/system") / self.service_name if os.name != "nt" else Path(self.repo_root) / self.service_name
         if unit_path.exists():
             install = self._sudo_prefix() + ["rm", "-f", str(unit_path)]
             _run_quiet(install, timeout=5.0)
